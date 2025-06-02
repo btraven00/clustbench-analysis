@@ -2,7 +2,15 @@
 """
 Script to aggregate clustbench.scores.gz files from the output tree,
 extracting dataset generator, dataset name, method, metric, scores,
-performance time (seconds), true k value, noise presence, and anomalies in k values.
+performance time (seconds), true k value, and noise presence.
+
+Usage:
+  python aggregate_scores.py --root <output_directory> [--format csv|parquet|both] [--debug]
+
+Examples:
+  python aggregate_scores.py --root out_apptainer-202505301205
+  python aggregate_scores.py --root out_apptainer-202505301205 --format parquet
+  python aggregate_scores.py --root out_apptainer-202505301205 --format both --debug
 """
 
 import os
@@ -16,6 +24,7 @@ import argparse
 from collections import defaultdict
 import numpy as np
 from pathlib import Path
+import warnings
 
 def extract_dataset_info(path):
     """Extract dataset generator and name from path or parameters.json"""
@@ -23,7 +32,7 @@ def extract_dataset_info(path):
     dir_match = re.search(r'dataset_generator-(\w+)_dataset_name-(\w+)', path)
     if dir_match:
         return dir_match.group(1), dir_match.group(2)
-    
+
     # Try to get from parameters.json
     params_file = os.path.join(os.path.dirname(path), 'parameters.json')
     if os.path.exists(params_file):
@@ -33,7 +42,7 @@ def extract_dataset_info(path):
                 return params.get('dataset_generator', ''), params.get('dataset_name', '')
             except:
                 pass
-    
+
     # Go up one level and try again
     parent_dir = os.path.dirname(os.path.dirname(path))
     if parent_dir == path:  # Stop recursion at root
@@ -46,14 +55,14 @@ def extract_method_info(path):
     dir_match = re.search(r'method-(\w+)', path)
     if dir_match:
         return dir_match.group(1)
-    
+
     # Find the method directory
     current_dir = os.path.dirname(path)
     # Try to navigate up to find method directory
     for _ in range(5):  # Limit recursion depth
         if current_dir == os.path.dirname(current_dir):  # Reached root
             break
-            
+
         # Look for parameters.json in the current directory
         params_file = os.path.join(current_dir, 'parameters.json')
         if os.path.exists(params_file):
@@ -65,21 +74,21 @@ def extract_method_info(path):
                         return method
                 except:
                     pass
-                    
+
         # Look for method in directory name
         if os.path.basename(current_dir).startswith('method-'):
             return os.path.basename(current_dir).split('-')[1]
-        
+
         # Check for clustering library and linkage method pattern
         base_dir = os.path.basename(current_dir)
         if base_dir.startswith('linkage-'):
             parent_dir = os.path.basename(os.path.dirname(current_dir))
             if parent_dir in ['agglomerative', 'fastcluster', 'sklearn']:
                 return f"{parent_dir}_{base_dir}"
-            
+
         # Move up one directory
         current_dir = os.path.dirname(current_dir)
-    
+
     # If we still don't have a method, check the path components directly
     path_parts = path.split(os.sep)
     for i, part in enumerate(path_parts):
@@ -88,7 +97,7 @@ def extract_method_info(path):
         if part.startswith('linkage-') and i > 0:
             if path_parts[i-1] in ['agglomerative', 'fastcluster', 'sklearn']:
                 return f"{path_parts[i-1]}_{part}"
-    
+
     return ''  # Return empty string if method can't be found
 
 def extract_metric_info(path):
@@ -97,7 +106,7 @@ def extract_metric_info(path):
     dir_match = re.search(r'metric-(\w+)', path)
     if dir_match:
         return dir_match.group(1)
-    
+
     # Try to get from parameters.json
     params_file = os.path.join(os.path.dirname(path), 'parameters.json')
     if os.path.exists(params_file):
@@ -107,7 +116,7 @@ def extract_metric_info(path):
                 return params.get('metric', '')
             except:
                 pass
-    
+
     return ''
 
 def find_method_performance(file_path):
@@ -116,50 +125,7 @@ def find_method_performance(file_path):
         # Navigate up from score file to find the method directory
         # Scores are in: .../method-XXX/metrics/partition_metrics/metric-YYY/clustbench.scores.gz
         current_dir = os.path.dirname(file_path)  # metric-YYY directory
-        
-        # If we're already at the method level, use this directory
-        if "method-" in current_dir:
-            method_dir = current_dir
-        else:
-            # Navigate up to partition_metrics
-            partition_metrics_dir = os.path.dirname(current_dir)
-            # Navigate up to metrics
-            metrics_dir = os.path.dirname(partition_metrics_dir)
-            # Navigate up to method
-            method_dir = os.path.dirname(metrics_dir)
-        
-        # Check for the performance file
-        perf_file = os.path.join(method_dir, 'clustbench_performance.txt')
-        
-        if os.path.exists(perf_file):
-            with open(perf_file, 'r') as f:
-                # Read the header line to get column positions
-                header = f.readline().strip().split('\t')
-                # Read the data line
-                data_line = f.readline().strip()
-                if data_line:
-                    data = data_line.split('\t')
-                    
-                    # Find the 's' (seconds) column index
-                    if 's' in header:
-                        s_index = header.index('s')
-                        if s_index < len(data):
-                            try:
-                                return float(data[s_index])
-                            except ValueError:
-                                pass
-    except Exception as e:
-        print(f"Error reading method performance file for {file_path}: {e}")
-    
-    return None
 
-def find_method_performance(file_path):
-    """Find and extract execution time (seconds) from method's clustbench_performance.txt"""
-    try:
-        # Navigate up from score file to find the method directory
-        # Scores are in: .../method-XXX/metrics/partition_metrics/metric-YYY/clustbench.scores.gz
-        current_dir = os.path.dirname(file_path)  # metric-YYY directory
-        
         # If we're already at the method level, use this directory
         if "method-" in current_dir:
             method_dir = current_dir
@@ -170,10 +136,10 @@ def find_method_performance(file_path):
             metrics_dir = os.path.dirname(partition_metrics_dir)
             # Navigate up to method
             method_dir = os.path.dirname(metrics_dir)
-        
+
         # Check for the performance file
         perf_file = os.path.join(method_dir, 'clustbench_performance.txt')
-        
+
         if os.path.exists(perf_file):
             with open(perf_file, 'r') as f:
                 # Read the header line to get column positions
@@ -182,7 +148,7 @@ def find_method_performance(file_path):
                 data_line = f.readline().strip()
                 if data_line:
                     data = data_line.split('\t')
-                    
+
                     # Find the 's' (seconds) column index
                     if 's' in header:
                         s_index = header.index('s')
@@ -193,34 +159,43 @@ def find_method_performance(file_path):
                                 pass
     except Exception as e:
         print(f"Error reading method performance file for {file_path}: {e}")
-    
+
     return None
 
 def process_scores_file(file_path):
-    """Process a clustbench.scores.gz file and extract relevant data"""
+    """
+    Process a clustbench.scores.gz file and extract relevant data
+
+    This function:
+    1. Extracts dataset, method and metric information from the path
+    2. Reads the performance time from the method's performance file
+    3. Parses the scores file to extract k-value scores
+    4. Detects duplicate k values with significantly different scores
+    """
     try:
         # Extract information from the path
         dataset_gen, dataset_name = extract_dataset_info(file_path)
         method = extract_method_info(file_path)
         metric = extract_metric_info(file_path)
-        
+
         # Extract performance time (seconds) from the method directory
         execution_time = find_method_performance(file_path)
-        
+
         # Read the gzipped CSV file
         with gzip.open(file_path, 'rt') as f:
             # Read the header and data
             reader = csv.reader(f)
             header = next(reader)
             data_rows = list(reader)
-            
+
             if len(data_rows) == 0:
                 return None
-            
+
             # Process the data
             data = data_rows[0]  # Assuming single row of values
-            
+
             # Check for duplicate k values with different results
+            # Check for duplicate k anomalies
             duplicate_k_anomaly = False
             k_values = {}
             for i, k in enumerate(header):
@@ -232,13 +207,18 @@ def process_scores_file(file_path):
                             # If same k appears multiple times, check if values differ significantly
                             if abs(k_values[k_cleaned] - value) > 1e-3:  # Epsilon of 1E-3
                                 duplicate_k_anomaly = True
+                                # Debug info collected even without debug flag to populate anomaly report
+                                if k_cleaned not in k_values.get('duplicates', {}):
+                                    k_values.setdefault('duplicates', {})[k_cleaned] = [(k_values[k_cleaned], value)]
+                                else:
+                                    k_values['duplicates'][k_cleaned].append((k_values[k_cleaned], value))
                         else:
                             k_values[k_cleaned] = value
                     except (ValueError, TypeError):
                         # Non-numeric values - just store first occurrence
                         if k_cleaned not in k_values:
                             k_values[k_cleaned] = data[i]
-            
+
             # Create result dictionary
             result = {
                 'dataset_generator': dataset_gen,
@@ -248,7 +228,7 @@ def process_scores_file(file_path):
                 'execution_time_seconds': execution_time,
                 'duplicate_k_anomaly': duplicate_k_anomaly
             }
-            
+
             # Add k values from header and corresponding scores
             for i, k in enumerate(header):
                 if i < len(data):
@@ -258,7 +238,7 @@ def process_scores_file(file_path):
                         result[k_cleaned] = float(data[i])
                     except ValueError:
                         result[k_cleaned] = data[i]
-                    
+
             return result
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
@@ -272,33 +252,38 @@ def extract_backend_timestamp(directory_name):
         return match.group(1), match.group(2)
     return None, None
 
-def get_dataset_true_k_and_noise(base_dir, dataset_gen, dataset_name):
+def extract_dataset_true_k_and_noise(base_dir, dataset_gen, dataset_name):
     """
     Extract the true number of clusters and noise presence from dataset labels file.
-    
+
     Parameters:
     base_dir (str): Base directory for clustbench output
     dataset_gen (str): Dataset generator name
     dataset_name (str): Dataset name
-    
+
     Returns:
     tuple: (true_k, has_noise) where true_k is the number of unique non-zero labels,
            and has_noise is True if label 0 is present
+
+    Notes:
+    - Searches for clustbench.labels*.gz files in hash-named directories
+    - Counts unique non-zero labels to determine true_k
+    - Checks for presence of label 0 to determine noise
     """
     # Path pattern to match dataset directories with hash names
     pattern = os.path.join(base_dir, 'data', 'clustbench', '.*')
     hash_dirs = glob.glob(pattern)
-    
+
     for hash_dir in hash_dirs:
         # Check for labels files
         label_files = glob.glob(os.path.join(hash_dir, 'clustbench.labels*.gz'))
-        
+
         for label_file in label_files:
             try:
                 # Read the labels file
                 with gzip.open(label_file, 'rt') as f:
                     labels = np.loadtxt(f)
-                
+
                 # Look for parameters.json to match dataset_gen and dataset_name
                 params_file = os.path.join(hash_dir, 'parameters.json')
                 if os.path.exists(params_file):
@@ -307,58 +292,94 @@ def get_dataset_true_k_and_noise(base_dir, dataset_gen, dataset_name):
                             params = json.load(f)
                             file_dataset_gen = params.get('dataset_generator', '')
                             file_dataset_name = params.get('dataset_name', '')
-                            
+
                             # If this is our dataset, return the true k and noise info
                             if file_dataset_gen == dataset_gen and file_dataset_name == dataset_name:
                                 # Count unique non-zero labels
                                 unique_labels = set(int(label) for label in labels)
                                 has_noise = 0 in unique_labels
-                                
+
                                 # Remove 0 (noise) from the count if present
                                 if has_noise:
                                     unique_labels.remove(0)
-                                
+
                                 true_k = len(unique_labels)
                                 return true_k, has_noise
                         except Exception as e:
                             print(f"Error processing parameters for {label_file}: {e}")
             except Exception as e:
                 print(f"Error reading labels file {label_file}: {e}")
-                
+
     # If we couldn't find or process the file, return None values
     return None, None
 
 def main():
-    """Main function to aggregate all clustbench.scores.gz files"""
+    """
+    Main function to aggregate all clustbench.scores.gz files
+
+    This function:
+    1. Processes command line arguments for directory and output format
+    2. Finds all clustbench.scores.gz files in the specified directory
+    3. Extracts scores, true_k values, and performance metrics
+    4. Detects anomalies in the data
+    5. Outputs aggregated data in CSV and/or Parquet format
+    6. Provides a detailed summary report of the data and any anomalies
+    """
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Aggregate clustbench scores from output directory')
+    parser = argparse.ArgumentParser(
+        description='Aggregate clustbench scores and detect anomalies from output directory',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Details:
+  - Extracts scores from clustbench.scores.gz files
+  - Determines true k value from each dataset's label file
+  - Finds execution time from clustbench_performance.txt files
+  - Detects duplicate k anomalies in score headers
+  - Creates aggregated file with all metrics for all methods
+
+Output columns:
+  - backend: Backend system used (extracted from directory name)
+  - run_timestamp: Timestamp of the run (extracted from directory name)
+  - dataset_generator, dataset_name: Dataset information
+  - true_k: Actual number of clusters in the dataset (from labels file)
+  - has_noise: Whether the dataset contains noise points (label 0)
+  - method: Clustering algorithm used
+  - metric: Evaluation metric name
+  - score: Score for k=true_k (if available)
+  - execution_time_seconds: Time taken by the algorithm
+  - duplicate_k_anomaly: Flag for duplicate k values with different scores
+  - k=X columns: Scores for each k value
+        """
+    )
     parser.add_argument('--root', '-r', type=str, default='out_apptainer-202505301205',
                         help='Root directory containing clustbench output')
     parser.add_argument('--debug', '-d', action='store_true',
-                        help='Enable debug output')
+                        help='Enable debug output (shows detailed file paths and anomaly information)')
+    parser.add_argument('--format', '-f', type=str, choices=['csv', 'parquet', 'both'], default='csv',
+                        help='Output format: csv (224KB), parquet (70KB), or both (default: csv)')
     args = parser.parse_args()
-    
+
     # Base directory
     base_dir = args.root
     debug_mode = args.debug
-    
+
     # Extract backend and timestamp
     backend, timestamp = extract_backend_timestamp(base_dir)
     print(f"Detected backend: {backend}, timestamp: {timestamp}")
-    
+
     # Find all clustbench.scores.gz files
     score_files = glob.glob(f'{base_dir}/**/clustbench.scores.gz', recursive=True)
     print(f"Found {len(score_files)} score files")
-    
+
     # Process each file and collect results
     results = []
-    
+
     # Cache for true_k and has_noise values to avoid repeated file reads
     dataset_info_cache = {}
-    
+
     # Track files with duplicate k anomalies
     duplicate_k_anomaly_files = []
-    
+
     for i, file_path in enumerate(score_files):
         if i % 100 == 0 and i > 0:
             print(f"Processed {i}/{len(score_files)} files...")
@@ -367,50 +388,50 @@ def main():
             # Get dataset generator and name from the result
             dataset_gen = result['dataset_generator']
             dataset_name = result['dataset_name']
-            
+
             # Use cache to avoid repeated file reads
             cache_key = f"{dataset_gen}_{dataset_name}"
             if cache_key not in dataset_info_cache:
-                true_k, has_noise = get_dataset_true_k_and_noise(base_dir, dataset_gen, dataset_name)
+                true_k, has_noise = extract_dataset_true_k_and_noise(base_dir, dataset_gen, dataset_name)
                 dataset_info_cache[cache_key] = (true_k, has_noise)
                 if debug_mode:
                     print(f"Dataset {dataset_gen}_{dataset_name}: true_k={true_k}, has_noise={has_noise}")
             else:
                 true_k, has_noise = dataset_info_cache[cache_key]
-            
+
             # Add true_k and has_noise to the result
             result['true_k'] = true_k
             result['has_noise'] = has_noise
-            
+
             # Extract score for k=true_k if available
             score_for_true_k = None
             true_k_str = f"k={true_k}"
             if true_k_str in result:
                 score_for_true_k = result[true_k_str]
             result['score'] = score_for_true_k
-            
+
             # Track duplicate k anomalies
             if result.get('duplicate_k_anomaly', False):
                 duplicate_k_anomaly_files.append(file_path)
                 if debug_mode:
                     print(f"DUPLICATE K ANOMALY DETECTED in file: {file_path}")
-            
+
             results.append(result)
-    
+
     # Convert to DataFrame
     if results:
         df = pd.DataFrame(results)
-        
+
         # Add backend and timestamp columns
         backend, timestamp = extract_backend_timestamp(base_dir)
         df['backend'] = backend
         df['run_timestamp'] = timestamp
-        
+
         # Organize columns - metadata first, then k values
         all_columns = df.columns.tolist()
         meta_columns = ['backend', 'run_timestamp', 'dataset_generator', 'dataset_name', 'true_k', 'has_noise', 'method', 'metric', 'score', 'execution_time_seconds', 'duplicate_k_anomaly']
         k_columns = [col for col in all_columns if col not in meta_columns]
-        
+
         # Sort k columns numerically if they follow 'k=X' pattern
         def extract_k(col):
             if col.startswith('k='):
@@ -419,35 +440,48 @@ def main():
                 except:
                     return 999999  # Large number for non-numeric values
             return 999999
-        
+
         k_columns.sort(key=extract_k)
-        
+
         # Reorder columns
         df = df[meta_columns + k_columns]
-        
-        # Save to CSV
-        output_file = f'clustbench_aggregated_scores_{backend}_{timestamp}.csv' if backend and timestamp else 'clustbench_aggregated_scores.csv'
-        df.to_csv(output_file, index=False)
-        print(f"Aggregated scores saved to {output_file}")
-        
+
+        # Base output filename without extension
+        base_output_file = f'clustbench_aggregated_scores_{backend}_{timestamp}' if backend and timestamp else 'clustbench_aggregated_scores'
+
+        # Save outputs based on format selection
+        if args.format == 'csv' or args.format == 'both':
+            csv_output_file = f"{base_output_file}.csv"
+            df.to_csv(csv_output_file, index=False)
+            print(f"Aggregated scores saved to {csv_output_file}")
+
+        if args.format == 'parquet' or args.format == 'both':
+            try:
+                parquet_output_file = f"{base_output_file}.parquet"
+                df.to_parquet(parquet_output_file, index=False)
+                print(f"Aggregated scores saved to {parquet_output_file}")
+            except Exception as e:
+                warnings.warn(f"Could not save to parquet format: {e}. You may need to install pyarrow or fastparquet.")
+
         # Show a summary
         print(f"\nProcessed {len(results)} out of {len(score_files)} score files")
         print(f"Dataset generators: {df['dataset_generator'].unique()}")
         print(f"Unique datasets: {df['dataset_name'].nunique()}")
         print(f"Unique methods: {df['method'].nunique()}")
         print(f"Unique metrics: {df['metric'].nunique()}")
-        
+
         # Check for and report k value anomalies
         # Convert boolean columns to numeric for counting
         df['duplicate_k_anomaly'] = df['duplicate_k_anomaly'].astype(int)
-        
+
         duplicate_anomaly_count = df['duplicate_k_anomaly'].sum()
-        
+
         if duplicate_anomaly_count > 0:
             print(f"\n⚠️ WARNING: Detected {duplicate_anomaly_count} rows with duplicate k anomalies!")
             print("These are cases where the same k value appears multiple times in the header")
             print("with significantly different scores (difference > 1E-3).")
-                
+            print("This indicates a potential issue with the score file generation.")
+
             # Report duplicate k anomalies
             if duplicate_anomaly_count > 0:
                 duplicate_anomaly_df = df[df['duplicate_k_anomaly'] == 1].copy()
@@ -458,7 +492,7 @@ def main():
                     gen, name, method, metric = index
                     method_display = "NO_METHOD" if pd.isna(method) or method == "" else method
                     print(f"  - {gen}, {name}, {method_display}, {metric}")
-                
+
                 if debug_mode:
                     print("\nFiles with duplicate k anomalies:")
                     for i, file_path in enumerate(duplicate_k_anomaly_files):
