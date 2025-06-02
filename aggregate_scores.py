@@ -2,7 +2,7 @@
 """
 Script to aggregate clustbench.scores.gz files from the output tree,
 extracting dataset generator, dataset name, method, metric, scores,
-and performance time (seconds).
+performance time (seconds), true k value, and noise presence.
 """
 
 import os
@@ -14,6 +14,7 @@ import re
 import csv
 import argparse
 from collections import defaultdict
+import numpy as np
 
 def extract_dataset_info(path):
     """Extract dataset generator and name from path or parameters.json"""
@@ -222,16 +223,75 @@ def extract_backend_timestamp(directory_name):
         return match.group(1), match.group(2)
     return None, None
 
+def get_dataset_true_k_and_noise(base_dir, dataset_gen, dataset_name):
+    """
+    Extract the true number of clusters and noise presence from dataset labels file.
+    
+    Parameters:
+    base_dir (str): Base directory for clustbench output
+    dataset_gen (str): Dataset generator name
+    dataset_name (str): Dataset name
+    
+    Returns:
+    tuple: (true_k, has_noise) where true_k is the number of unique non-zero labels,
+           and has_noise is True if label 0 is present
+    """
+    # Path pattern to match dataset directories with hash names
+    pattern = os.path.join(base_dir, 'data', 'clustbench', '.*')
+    hash_dirs = glob.glob(pattern)
+    
+    for hash_dir in hash_dirs:
+        # Check for labels files
+        label_files = glob.glob(os.path.join(hash_dir, 'clustbench.labels*.gz'))
+        
+        for label_file in label_files:
+            try:
+                # Read the labels file
+                with gzip.open(label_file, 'rt') as f:
+                    labels = np.loadtxt(f)
+                
+                # Look for parameters.json to match dataset_gen and dataset_name
+                params_file = os.path.join(hash_dir, 'parameters.json')
+                if os.path.exists(params_file):
+                    with open(params_file, 'r') as f:
+                        try:
+                            params = json.load(f)
+                            file_dataset_gen = params.get('dataset_generator', '')
+                            file_dataset_name = params.get('dataset_name', '')
+                            
+                            # If this is our dataset, return the true k and noise info
+                            if file_dataset_gen == dataset_gen and file_dataset_name == dataset_name:
+                                # Count unique non-zero labels
+                                unique_labels = set(int(label) for label in labels)
+                                has_noise = 0 in unique_labels
+                                
+                                # Remove 0 (noise) from the count if present
+                                if has_noise:
+                                    unique_labels.remove(0)
+                                
+                                true_k = len(unique_labels)
+                                return true_k, has_noise
+                        except Exception as e:
+                            print(f"Error processing parameters for {label_file}: {e}")
+            except Exception as e:
+                print(f"Error reading labels file {label_file}: {e}")
+                
+    # If we couldn't find or process the file, return None values
+    return None, None
+
 def main():
     """Main function to aggregate all clustbench.scores.gz files"""
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Aggregate clustbench scores from output directory')
     parser.add_argument('--root', '-r', type=str, default='out_apptainer-202505301205',
                         help='Root directory containing clustbench output')
+    parser.add_argument('--debug', '-d', action='store_true',
+                        help='Enable debug output')
     args = parser.parse_args()
     
     # Base directory
     base_dir = args.root
+    debug_mode = args.debug
     
     # Extract backend and timestamp
     backend, timestamp = extract_backend_timestamp(base_dir)
@@ -243,11 +303,33 @@ def main():
     
     # Process each file and collect results
     results = []
+    
+    # Cache for true_k and has_noise values to avoid repeated file reads
+    dataset_info_cache = {}
+    
     for i, file_path in enumerate(score_files):
         if i % 100 == 0 and i > 0:
             print(f"Processed {i}/{len(score_files)} files...")
         result = process_scores_file(file_path)
         if result:
+            # Get dataset generator and name from the result
+            dataset_gen = result['dataset_generator']
+            dataset_name = result['dataset_name']
+            
+            # Use cache to avoid repeated file reads
+            cache_key = f"{dataset_gen}_{dataset_name}"
+            if cache_key not in dataset_info_cache:
+                true_k, has_noise = get_dataset_true_k_and_noise(base_dir, dataset_gen, dataset_name)
+                dataset_info_cache[cache_key] = (true_k, has_noise)
+                if debug_mode:
+                    print(f"Dataset {dataset_gen}_{dataset_name}: true_k={true_k}, has_noise={has_noise}")
+            else:
+                true_k, has_noise = dataset_info_cache[cache_key]
+            
+            # Add true_k and has_noise to the result
+            result['true_k'] = true_k
+            result['has_noise'] = has_noise
+            
             results.append(result)
     
     # Convert to DataFrame
@@ -261,7 +343,7 @@ def main():
         
         # Organize columns - metadata first, then k values
         all_columns = df.columns.tolist()
-        meta_columns = ['backend', 'run_timestamp', 'dataset_generator', 'dataset_name', 'method', 'metric', 'execution_time_seconds']
+        meta_columns = ['backend', 'run_timestamp', 'dataset_generator', 'dataset_name', 'true_k', 'has_noise', 'method', 'metric', 'execution_time_seconds']
         k_columns = [col for col in all_columns if col not in meta_columns]
         
         # Sort k columns numerically if they follow 'k=X' pattern
