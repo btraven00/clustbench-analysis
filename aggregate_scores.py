@@ -2,7 +2,7 @@
 """
 Script to aggregate clustbench.scores.gz files from the output tree,
 extracting dataset generator, dataset name, method, metric, scores,
-performance time (seconds), true k value, and noise presence.
+performance time (seconds), true k value, noise presence, and anomalies in k values.
 """
 
 import os
@@ -15,6 +15,7 @@ import csv
 import argparse
 from collections import defaultdict
 import numpy as np
+from pathlib import Path
 
 def extract_dataset_info(path):
     """Extract dataset generator and name from path or parameters.json"""
@@ -46,21 +47,49 @@ def extract_method_info(path):
     if dir_match:
         return dir_match.group(1)
     
-    # Try to get from parameters.json
-    params_file = os.path.join(os.path.dirname(path), 'parameters.json')
-    if os.path.exists(params_file):
-        with open(params_file, 'r') as f:
-            try:
-                params = json.load(f)
-                return params.get('method', '')
-            except:
-                pass
+    # Find the method directory
+    current_dir = os.path.dirname(path)
+    # Try to navigate up to find method directory
+    for _ in range(5):  # Limit recursion depth
+        if current_dir == os.path.dirname(current_dir):  # Reached root
+            break
+            
+        # Look for parameters.json in the current directory
+        params_file = os.path.join(current_dir, 'parameters.json')
+        if os.path.exists(params_file):
+            with open(params_file, 'r') as f:
+                try:
+                    params = json.load(f)
+                    method = params.get('method', '')
+                    if method:
+                        return method
+                except:
+                    pass
+                    
+        # Look for method in directory name
+        if os.path.basename(current_dir).startswith('method-'):
+            return os.path.basename(current_dir).split('-')[1]
+        
+        # Check for clustering library and linkage method pattern
+        base_dir = os.path.basename(current_dir)
+        if base_dir.startswith('linkage-'):
+            parent_dir = os.path.basename(os.path.dirname(current_dir))
+            if parent_dir in ['agglomerative', 'fastcluster', 'sklearn']:
+                return f"{parent_dir}_{base_dir}"
+            
+        # Move up one directory
+        current_dir = os.path.dirname(current_dir)
     
-    # Go up one level and try again
-    parent_dir = os.path.dirname(os.path.dirname(path))
-    if parent_dir == path:  # Stop recursion at root
-        return ''
-    return extract_method_info(parent_dir)
+    # If we still don't have a method, check the path components directly
+    path_parts = path.split(os.sep)
+    for i, part in enumerate(path_parts):
+        if part.startswith('method-'):
+            return part.split('-')[1]
+        if part.startswith('linkage-') and i > 0:
+            if path_parts[i-1] in ['agglomerative', 'fastcluster', 'sklearn']:
+                return f"{path_parts[i-1]}_{part}"
+    
+    return ''  # Return empty string if method can't be found
 
 def extract_metric_info(path):
     """Extract metric name from path or parameters.json"""
@@ -191,13 +220,33 @@ def process_scores_file(file_path):
             # Process the data
             data = data_rows[0]  # Assuming single row of values
             
+            # Check for duplicate k values with different results
+            duplicate_k_anomaly = False
+            k_values = {}
+            for i, k in enumerate(header):
+                if i < len(data):
+                    k_cleaned = k.strip('"')  # Remove quotes if present
+                    try:
+                        value = float(data[i])
+                        if k_cleaned in k_values:
+                            # If same k appears multiple times, check if values differ significantly
+                            if abs(k_values[k_cleaned] - value) > 1e-3:  # Epsilon of 1E-3
+                                duplicate_k_anomaly = True
+                        else:
+                            k_values[k_cleaned] = value
+                    except (ValueError, TypeError):
+                        # Non-numeric values - just store first occurrence
+                        if k_cleaned not in k_values:
+                            k_values[k_cleaned] = data[i]
+            
             # Create result dictionary
             result = {
                 'dataset_generator': dataset_gen,
                 'dataset_name': dataset_name,
                 'method': method,
                 'metric': metric,
-                'execution_time_seconds': execution_time
+                'execution_time_seconds': execution_time,
+                'duplicate_k_anomaly': duplicate_k_anomaly
             }
             
             # Add k values from header and corresponding scores
@@ -307,6 +356,9 @@ def main():
     # Cache for true_k and has_noise values to avoid repeated file reads
     dataset_info_cache = {}
     
+    # Track files with duplicate k anomalies
+    duplicate_k_anomaly_files = []
+    
     for i, file_path in enumerate(score_files):
         if i % 100 == 0 and i > 0:
             print(f"Processed {i}/{len(score_files)} files...")
@@ -330,6 +382,19 @@ def main():
             result['true_k'] = true_k
             result['has_noise'] = has_noise
             
+            # Extract score for k=true_k if available
+            score_for_true_k = None
+            true_k_str = f"k={true_k}"
+            if true_k_str in result:
+                score_for_true_k = result[true_k_str]
+            result['score'] = score_for_true_k
+            
+            # Track duplicate k anomalies
+            if result.get('duplicate_k_anomaly', False):
+                duplicate_k_anomaly_files.append(file_path)
+                if debug_mode:
+                    print(f"DUPLICATE K ANOMALY DETECTED in file: {file_path}")
+            
             results.append(result)
     
     # Convert to DataFrame
@@ -343,7 +408,7 @@ def main():
         
         # Organize columns - metadata first, then k values
         all_columns = df.columns.tolist()
-        meta_columns = ['backend', 'run_timestamp', 'dataset_generator', 'dataset_name', 'true_k', 'has_noise', 'method', 'metric', 'execution_time_seconds']
+        meta_columns = ['backend', 'run_timestamp', 'dataset_generator', 'dataset_name', 'true_k', 'has_noise', 'method', 'metric', 'score', 'execution_time_seconds', 'duplicate_k_anomaly']
         k_columns = [col for col in all_columns if col not in meta_columns]
         
         # Sort k columns numerically if they follow 'k=X' pattern
@@ -371,6 +436,34 @@ def main():
         print(f"Unique datasets: {df['dataset_name'].nunique()}")
         print(f"Unique methods: {df['method'].nunique()}")
         print(f"Unique metrics: {df['metric'].nunique()}")
+        
+        # Check for and report k value anomalies
+        # Convert boolean columns to numeric for counting
+        df['duplicate_k_anomaly'] = df['duplicate_k_anomaly'].astype(int)
+        
+        duplicate_anomaly_count = df['duplicate_k_anomaly'].sum()
+        
+        if duplicate_anomaly_count > 0:
+            print(f"\n⚠️ WARNING: Detected {duplicate_anomaly_count} rows with duplicate k anomalies!")
+            print("These are cases where the same k value appears multiple times in the header")
+            print("with significantly different scores (difference > 1E-3).")
+                
+            # Report duplicate k anomalies
+            if duplicate_anomaly_count > 0:
+                duplicate_anomaly_df = df[df['duplicate_k_anomaly'] == 1].copy()
+                duplicate_anomaly_df['method_display'] = duplicate_anomaly_df['method'].fillna("NO_METHOD")
+                duplicate_groups = duplicate_anomaly_df.groupby(['dataset_generator', 'dataset_name', 'method_display', 'metric']).size()
+                print("\nDuplicate k anomalies by (dataset_generator, dataset_name, method, metric):")
+                for index, count in duplicate_groups.items():
+                    gen, name, method, metric = index
+                    method_display = "NO_METHOD" if pd.isna(method) or method == "" else method
+                    print(f"  - {gen}, {name}, {method_display}, {metric}")
+                
+                if debug_mode:
+                    print("\nFiles with duplicate k anomalies:")
+                    for i, file_path in enumerate(duplicate_k_anomaly_files):
+                        print(f"  {i+1}. {Path(file_path).relative_to(Path(base_dir))}")
+                # Detailed anomaly information is handled in the files with duplicate k anomalies section above
         print("\nExample rows:")
         print(df.head())
     else:
