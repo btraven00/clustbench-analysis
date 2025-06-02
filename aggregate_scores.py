@@ -12,6 +12,7 @@ import json
 import pandas as pd
 import re
 import csv
+import argparse
 from collections import defaultdict
 
 def extract_dataset_info(path):
@@ -213,10 +214,28 @@ def process_scores_file(file_path):
         print(f"Error processing {file_path}: {e}")
         return None
 
+def extract_backend_timestamp(directory_name):
+    """Extract backend and timestamp from directory name"""
+    # Expected format: out_BACKEND-TIMESTAMP
+    match = re.match(r'out_([^-]+)-(\d+)', os.path.basename(directory_name))
+    if match:
+        return match.group(1), match.group(2)
+    return None, None
+
 def main():
     """Main function to aggregate all clustbench.scores.gz files"""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Aggregate clustbench scores from output directory')
+    parser.add_argument('--root', '-r', type=str, default='out_apptainer-202505301205',
+                        help='Root directory containing clustbench output')
+    args = parser.parse_args()
+    
     # Base directory
-    base_dir = 'out_apptainer-202505301205'
+    base_dir = args.root
+    
+    # Extract backend and timestamp
+    backend, timestamp = extract_backend_timestamp(base_dir)
+    print(f"Detected backend: {backend}, timestamp: {timestamp}")
     
     # Find all clustbench.scores.gz files
     score_files = glob.glob(f'{base_dir}/**/clustbench.scores.gz', recursive=True)
@@ -235,9 +254,14 @@ def main():
     if results:
         df = pd.DataFrame(results)
         
+        # Add backend and timestamp columns
+        backend, timestamp = extract_backend_timestamp(base_dir)
+        df['backend'] = backend
+        df['run_timestamp'] = timestamp
+        
         # Organize columns - metadata first, then k values
         all_columns = df.columns.tolist()
-        meta_columns = ['dataset_generator', 'dataset_name', 'method', 'metric', 'execution_time_seconds']
+        meta_columns = ['backend', 'run_timestamp', 'dataset_generator', 'dataset_name', 'method', 'metric', 'execution_time_seconds']
         k_columns = [col for col in all_columns if col not in meta_columns]
         
         # Sort k columns numerically if they follow 'k=X' pattern
@@ -255,7 +279,7 @@ def main():
         df = df[meta_columns + k_columns]
         
         # Save to CSV
-        output_file = 'clustbench_aggregated_scores.csv'
+        output_file = f'clustbench_aggregated_scores_{backend}_{timestamp}.csv' if backend and timestamp else 'clustbench_aggregated_scores.csv'
         df.to_csv(output_file, index=False)
         print(f"Aggregated scores saved to {output_file}")
         
