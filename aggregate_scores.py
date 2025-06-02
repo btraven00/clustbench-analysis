@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Script to aggregate clustbench.scores.gz files from the output tree,
-extracting dataset generator, dataset name, method, metric, and scores.
+extracting dataset generator, dataset name, method, metric, scores,
+and performance time (seconds).
 """
 
 import os
@@ -78,6 +79,92 @@ def extract_metric_info(path):
     
     return ''
 
+def find_method_performance(file_path):
+    """Find and extract execution time (seconds) from method's clustbench_performance.txt"""
+    try:
+        # Navigate up from score file to find the method directory
+        # Scores are in: .../method-XXX/metrics/partition_metrics/metric-YYY/clustbench.scores.gz
+        current_dir = os.path.dirname(file_path)  # metric-YYY directory
+        
+        # If we're already at the method level, use this directory
+        if "method-" in current_dir:
+            method_dir = current_dir
+        else:
+            # Navigate up to partition_metrics
+            partition_metrics_dir = os.path.dirname(current_dir)
+            # Navigate up to metrics
+            metrics_dir = os.path.dirname(partition_metrics_dir)
+            # Navigate up to method
+            method_dir = os.path.dirname(metrics_dir)
+        
+        # Check for the performance file
+        perf_file = os.path.join(method_dir, 'clustbench_performance.txt')
+        
+        if os.path.exists(perf_file):
+            with open(perf_file, 'r') as f:
+                # Read the header line to get column positions
+                header = f.readline().strip().split('\t')
+                # Read the data line
+                data_line = f.readline().strip()
+                if data_line:
+                    data = data_line.split('\t')
+                    
+                    # Find the 's' (seconds) column index
+                    if 's' in header:
+                        s_index = header.index('s')
+                        if s_index < len(data):
+                            try:
+                                return float(data[s_index])
+                            except ValueError:
+                                pass
+    except Exception as e:
+        print(f"Error reading method performance file for {file_path}: {e}")
+    
+    return None
+
+def find_method_performance(file_path):
+    """Find and extract execution time (seconds) from method's clustbench_performance.txt"""
+    try:
+        # Navigate up from score file to find the method directory
+        # Scores are in: .../method-XXX/metrics/partition_metrics/metric-YYY/clustbench.scores.gz
+        current_dir = os.path.dirname(file_path)  # metric-YYY directory
+        
+        # If we're already at the method level, use this directory
+        if "method-" in current_dir:
+            method_dir = current_dir
+        else:
+            # Navigate up to partition_metrics
+            partition_metrics_dir = os.path.dirname(current_dir)
+            # Navigate up to metrics
+            metrics_dir = os.path.dirname(partition_metrics_dir)
+            # Navigate up to method
+            method_dir = os.path.dirname(metrics_dir)
+        
+        # Check for the performance file
+        perf_file = os.path.join(method_dir, 'clustbench_performance.txt')
+        
+        if os.path.exists(perf_file):
+            with open(perf_file, 'r') as f:
+                # Read the header line to get column positions
+                header = f.readline().strip().split('\t')
+                # Read the data line
+                data_line = f.readline().strip()
+                if data_line:
+                    data = data_line.split('\t')
+                    
+                    # Find the 's' (seconds) column index
+                    if 's' in header:
+                        s_index = header.index('s')
+                        if s_index < len(data):
+                            try:
+                                return float(data[s_index])
+                            except ValueError:
+                                pass
+    except Exception as e:
+        print(f"Error reading method performance file for {file_path}: {e}")
+    
+    return None
+
 def process_scores_file(file_path):
     """Process a clustbench.scores.gz file and extract relevant data"""
     try:
@@ -85,6 +172,9 @@ def process_scores_file(file_path):
         dataset_gen, dataset_name = extract_dataset_info(file_path)
         method = extract_method_info(file_path)
         metric = extract_metric_info(file_path)
+        
+        # Extract performance time (seconds) from the method directory
+        execution_time = find_method_performance(file_path)
         
         # Read the gzipped CSV file
         with gzip.open(file_path, 'rt') as f:
@@ -104,7 +194,8 @@ def process_scores_file(file_path):
                 'dataset_generator': dataset_gen,
                 'dataset_name': dataset_name,
                 'method': method,
-                'metric': metric
+                'metric': metric,
+                'execution_time_seconds': execution_time
             }
             
             # Add k values from header and corresponding scores
@@ -146,7 +237,7 @@ def main():
         
         # Organize columns - metadata first, then k values
         all_columns = df.columns.tolist()
-        meta_columns = ['dataset_generator', 'dataset_name', 'method', 'metric']
+        meta_columns = ['dataset_generator', 'dataset_name', 'method', 'metric', 'execution_time_seconds']
         k_columns = [col for col in all_columns if col not in meta_columns]
         
         # Sort k columns numerically if they follow 'k=X' pattern
