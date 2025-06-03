@@ -19,6 +19,7 @@ create_test_parquet <- function() {
     dataset_name = c("atom", "iris", "tetra"),
     method = c("kmeans", "dbscan", "hdbscan"),
     metric = c("ari", "ami", "nmi"),
+    run_timestamp = c("20230101", "20230102", "20230103"),
     score = c(0.85, 0.92, 0.78),
     execution_time_seconds = c(1.2, 0.8, 2.5)
   )
@@ -46,6 +47,7 @@ test_that("load_from_parquet correctly loads data and converts factors", {
   expect_s3_class(result$dataset_name, "factor")
   expect_s3_class(result$method, "factor")
   expect_s3_class(result$metric, "factor")
+  expect_s3_class(result$run_timestamp, "factor")
   
   # Test that numeric columns remain numeric
   expect_type(result$score, "double")
@@ -57,6 +59,7 @@ test_that("load_from_parquet correctly loads data and converts factors", {
   expect_setequal(levels(result$dataset_name), c("atom", "iris", "tetra"))
   expect_setequal(levels(result$method), c("kmeans", "dbscan", "hdbscan"))
   expect_setequal(levels(result$metric), c("ari", "ami", "nmi"))
+  expect_setequal(levels(result$run_timestamp), c("20230101", "20230102", "20230103"))
   
   # Test row count
   expect_equal(nrow(result), 3)

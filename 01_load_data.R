@@ -18,17 +18,17 @@ library(dplyr)
 find_parquet_file <- function(dir = ".", pattern = "*.parquet") {
   # List all parquet files in the directory
   files <- list.files(dir, pattern = pattern, full.names = TRUE)
-  
+
   if (length(files) == 0) {
     stop(paste("No Parquet files found in", dir))
   }
-  
+
   # Get file info including modification time
   file_info <- file.info(files)
-  
+
   # Find the most recent file
   most_recent <- rownames(file_info)[which.max(file_info$mtime)]
-  
+
   message(paste("Using most recent Parquet file:", most_recent))
   return(most_recent)
 }
@@ -51,13 +51,17 @@ find_parquet_file <- function(dir = ".", pattern = "*.parquet") {
 #' data <- load_from_parquet("path/to/file.parquet")
 #' }
 load_from_parquet <- function(path) {
-  d <- tibble(read_parquet(path)) %>%
-    mutate(
-      backend = factor(backend),
-      dataset_generator = factor(dataset_generator),
-      dataset_name = factor(dataset_name),
-      method = factor(method),
-      metric = factor(metric)
-    )
+  d <- tibble(read_parquet(path))
+  
+  # Convert columns to factors only if they exist
+  factor_columns <- c("backend", "dataset_generator", "dataset_name", 
+                     "method", "metric", "run_timestamp")
+  
+  for (col in factor_columns) {
+    if (col %in% names(d)) {
+      d[[col]] <- factor(d[[col]])
+    }
+  }
+  
   return(d)
 }

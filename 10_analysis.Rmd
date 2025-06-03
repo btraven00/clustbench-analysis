@@ -1,0 +1,309 @@
+---
+title: "ClustBench Analysis"
+author: "omnibenchmark core team"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    highlight: tango
+    code_folding: show
+    df_print: paged
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,           # Show code chunks in output
+  warning = FALSE,       # Don't show warnings
+  message = FALSE,       # Don't show messages
+  fig.width = 10,        # Default figure width
+  fig.height = 6,        # Default figure height
+  fig.align = "center"   # Center figures
+)
+
+# Load required libraries
+library(dplyr)          # For data manipulation
+library(ggplot2)        # For visualization
+library(readr)          # For reading data
+library(tibble)         # For tibble data structures
+library(stringr)        # For string manipulation
+library(arrow)          # For Parquet file handling
+library(patchwork)      # For combining plots
+library(knitr)          # For tables
+library(DT)             # For interactive tables
+library(kableExtra)     # For pretty tables
+
+# Load helper functions
+source("01_load_data.R")
+source("02_aggregation.R")
+```
+
+# Introduction
+
+This analysis examines clustering benchmark results from several ClustBench omnibenchmark runs.
+
+For now, I'm examining only a partial run of the benchmark, for a few selected backends and just the FCPS methods.
+
+## Load and Prepare Data
+
+```{r load_data}
+# Find the most recent parquet file if not specified
+data_file <- find_parquet_file(".")
+
+# Load the data
+data <- load_from_parquet(data_file)
+
+# Show the data structure
+glimpse(data)
+```
+
+## Data Overview
+
+```{r data_summary}
+# Count number of unique values in categorical columns
+cat("Unique backends:", nlevels(data$backend), "\n")
+cat("Unique dataset generators:", nlevels(data$dataset_generator), "\n")
+cat("Unique dataset names:", nlevels(data$dataset_name), "\n")
+cat("Unique methods:", nlevels(data$method), "\n")
+cat("Unique metrics:", nlevels(data$metric), "\n")
+cat("Unique runs:", nlevels(data$run_timestamp), "\n")
+
+# Display summary statistics
+data %>%
+  group_by(backend) %>%
+  summarize(
+    total_runs = n(),
+    datasets = n_distinct(paste(dataset_generator, dataset_name)),
+    methods = n_distinct(method),
+    avg_score = mean(score, na.rm = TRUE),
+    med_score = median(score, na.rm = TRUE),
+    avg_time = mean(execution_time_seconds, na.rm = TRUE),
+    med_time = median(execution_time_seconds, na.rm = TRUE)
+  ) %>%
+  kable() %>%
+  kable_styling()
+```
+
+# Score Analysis
+
+## Distribution of Scores
+
+```{r score_distribution}
+# Plot distribution of scores for each backend
+data %>%
+  ggplot(aes(x = backend, y = score, fill = backend)) +
+  geom_boxplot() +
+  labs(
+    title = "Distribution of Scores Across Backends",
+    x = "Backend",
+    y = "Score"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+## Score by Method
+
+```{r score_by_method}
+# Plot average score by method for each backend
+data %>%
+  group_by(backend, method) %>%
+  summarize(
+    avg_score = mean(score, na.rm = TRUE),
+    std_dev = sd(score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = method, y = avg_score, fill = backend)) +
+  geom_col(position = "dodge") +
+  geom_errorbar(
+    aes(ymin = avg_score - std_dev, ymax = avg_score + std_dev),
+    position = position_dodge(0.9),
+    width = 0.25
+  ) +
+  labs(
+    title = "Average Score by Method and Backend",
+    x = "Method",
+    y = "Average Score"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Score by Dataset
+
+```{r score_by_dataset}
+# Plot heatmap of scores by dataset and method
+data %>%
+  filter(metric == levels(data$metric)[1]) %>%  # Choose one metric for clarity
+  group_by(dataset_name, method) %>%
+  summarize(
+    avg_score = mean(score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = method, y = dataset_name, fill = avg_score)) +
+  geom_tile() +
+  scale_fill_viridis_c() +
+  labs(
+    title = "Average Score by Dataset and Method",
+    x = "Method",
+    y = "Dataset"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Performance Analysis
+
+## Execution Time
+
+```{r execution_time}
+# Plot distribution of execution times
+data %>%
+  ggplot(aes(x = backend, y = execution_time_seconds, fill = backend)) +
+  geom_boxplot() +
+  labs(
+    title = "Distribution of Execution Times Across Backends",
+    x = "Backend",
+    y = "Execution Time (seconds)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+## Execution Time by Method
+
+```{r time_by_method}
+# Plot average execution time by method for each backend
+data %>%
+  group_by(backend, method) %>%
+  summarize(
+    avg_time = mean(execution_time_seconds, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = method, y = avg_time, fill = backend)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Average Execution Time by Method and Backend",
+    x = "Method",
+    y = "Average Time (seconds)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Runtime vs Score Tradeoff
+
+```{r performance_quality}
+# Plot score vs execution time
+data %>%
+  ggplot(aes(x = execution_time_seconds, y = score, color = backend, shape = method)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    title = "Score vs. Execution Time",
+    x = "Execution Time (seconds)",
+    y = "Score"
+  ) +
+  theme_minimal() +
+  scale_x_log10() +  # Log scale for execution time
+  geom_smooth(aes(group = method), method = "loess", se = FALSE, linetype = "dashed")
+```
+
+# Backend Comparison Plots
+
+```{r backend_comparison}
+# Generate diagonal comparison plots for backends
+compare_plots <- compare_backend_plots(data)
+compare_plots
+```
+
+The diagonal line represents perfect agreement between backends. Points falling on this line indicate identical performance between backends, while deviations suggest differences in implementation or environment effects.
+
+# Anomaly Detection
+
+```{r anomalies}
+# Find outliers in performance (execution times)
+data %>%
+  group_by(method, dataset_name) %>%
+  mutate(
+    time_z_score = (execution_time_seconds - mean(execution_time_seconds)) /
+                  sd(execution_time_seconds)
+  ) %>%
+  filter(abs(time_z_score) > 2) %>%
+  select(backend, dataset_generator, dataset_name, method, metric,
+         execution_time_seconds, time_z_score, score) %>%
+  arrange(desc(abs(time_z_score))) %>%
+  head(10) %>%
+  kable(caption = "Potential Performance Anomalies") %>%
+  kable_styling()
+
+# Find outliers in scores
+data %>%
+  group_by(method, dataset_name) %>%
+  mutate(
+    score_z_score = (score - mean(score)) / sd(score)
+  ) %>%
+  filter(abs(score_z_score) > 2) %>%
+  select(backend, dataset_generator, dataset_name, method, metric,
+         score, score_z_score, execution_time_seconds) %>%
+  arrange(desc(abs(score_z_score))) %>%
+  head(10) %>%
+  kable(caption = "Potential Score Anomalies") %>%
+  kable_styling()
+```
+
+# Score Consistency Analysis
+
+```{r score_consistency}
+# Check if every repetition for each dataset x method x metric gets exactly the same score
+consistency_metrics <- check_score_consistency(data)
+
+# Display summary of consistency metrics
+consistency_metrics %>%
+  filter(n_repetitions > 1) %>%  # Only show combinations with multiple repetitions
+  arrange(desc(score_range)) %>%  # Sort by least consistent first
+  head(10) %>%
+  kable(caption = "Top 10 Score Inconsistencies Across Repetitions") %>%
+  kable_styling()
+
+# Summarize consistency by backend
+backend_consistency <- summarize_backend_consistency(data)
+
+# Display backend consistency summary
+backend_consistency %>%
+  kable(caption = "Backend Consistency Summary") %>%
+  kable_styling()
+
+# Visualize distribution of score ranges
+consistency_metrics %>%
+  filter(n_repetitions > 1, score_range > 0) %>%
+  ggplot(aes(x = score_range)) +
+  geom_histogram(bins = 30) +
+  labs(
+    title = "Distribution of Score Ranges Across Repetitions",
+    x = "Score Range (Max - Min)",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+This analysis examines the consistency of scores across multiple repetitions of the same dataset, method, and metric combination. A score range of 0 indicates perfect consistency (all repetitions produced identical scores), while larger values suggest variability in the algorithm's output.
+
+# Conclusions
+
+Key findings include:
+
+- [conclusions here]
+
+# Next Steps
+
+- [to be explored at a later stage]
+
+# Session Information
+
+```{r session_info}
+# Print session information for reproducibility
+sessionInfo()
+```

@@ -1,0 +1,396 @@
+---
+title: "ClustBench Analysis Dashboard"
+author: "omnibenchmark core team"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    theme: united
+    navbar:
+      - { title: "About", icon: "fa-info-circle", href: "https://github.com/omnibenchmark/clustbench", align: right }
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(arrow)
+library(DT)
+library(plotly)
+library(shiny)
+library(scales)
+
+# Load helper functions
+source("01_load_data.R")
+
+# Find and load the most recent parquet file
+data_file <- find_parquet_file(".")
+data <- load_from_parquet(data_file)
+```
+
+Overview
+=====================================
+
+Row {data-height=150}
+-----------------------------------------------------------------------
+
+### Backends
+```{r}
+valueBox(nlevels(data$backend), 
+         icon = "fa-server", 
+         color = "primary")
+```
+
+### Datasets
+```{r}
+valueBox(n_distinct(paste(data$dataset_generator, data$dataset_name)), 
+         icon = "fa-database", 
+         color = "info")
+```
+
+### Methods
+```{r}
+valueBox(nlevels(data$method), 
+         icon = "fa-cogs", 
+         color = "success")
+```
+
+### Metrics
+```{r}
+valueBox(nlevels(data$metric), 
+         icon = "fa-chart-line", 
+         color = "warning")
+```
+
+### Average Score
+```{r}
+valueBox(sprintf("%.3f", mean(data$score, na.rm = TRUE)), 
+         icon = "fa-star", 
+         color = "primary")
+```
+
+Row
+-----------------------------------------------------------------------
+
+### Score Distribution by Backend
+```{r}
+plot_ly(data, 
+        x = ~backend, 
+        y = ~score, 
+        color = ~backend, 
+        type = "box") %>%
+  layout(title = "Score Distribution by Backend",
+         xaxis = list(title = ""),
+         yaxis = list(title = "Score"),
+         showlegend = FALSE)
+```
+
+### Execution Time Distribution by Backend
+```{r}
+plot_ly(data, 
+        x = ~backend, 
+        y = ~execution_time_seconds, 
+        color = ~backend, 
+        type = "box") %>%
+  layout(title = "Execution Time Distribution by Backend",
+         xaxis = list(title = ""),
+         yaxis = list(title = "Time (seconds)", type = "log"),
+         showlegend = FALSE)
+```
+
+Row
+-----------------------------------------------------------------------
+
+### Scores by Method and Backend
+```{r}
+method_scores <- data %>%
+  group_by(backend, method) %>%
+  summarize(
+    avg_score = mean(score, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+plot_ly(method_scores, 
+        x = ~method, 
+        y = ~avg_score, 
+        color = ~backend, 
+        type = "bar") %>%
+  layout(title = "Average Score by Method and Backend",
+         xaxis = list(title = ""),
+         yaxis = list(title = "Average Score"),
+         barmode = "group")
+```
+
+Performance Analysis
+=====================================
+
+Row {.sidebar data-width=250}
+-----------------------------------------------------------------------
+
+```{r}
+selectInput("backend_filter", "Backend:", 
+            choices = c("All", levels(data$backend)),
+            selected = "All")
+
+selectInput("method_filter", "Method:",
+            choices = c("All", levels(data$method)),
+            selected = "All")
+
+selectInput("dataset_gen_filter", "Dataset Generator:",
+            choices = c("All", levels(data$dataset_generator)),
+            selected = "All")
+
+selectInput("metric_filter", "Metric:",
+            choices = c("All", levels(data$metric)),
+            selected = "All")
+
+sliderInput("time_range", "Execution Time (seconds):",
+            min = 0, max = max(data$execution_time_seconds, na.rm = TRUE),
+            value = c(0, max(data$execution_time_seconds, na.rm = TRUE)))
+```
+
+Row
+-----------------------------------------------------------------------
+
+### Performance vs Quality
+```{r}
+filtered_data <- reactive({
+  result <- data
+  
+  if (input$backend_filter != "All") {
+    result <- result %>% filter(backend == input$backend_filter)
+  }
+  
+  if (input$method_filter != "All") {
+    result <- result %>% filter(method == input$method_filter)
+  }
+  
+  if (input$dataset_gen_filter != "All") {
+    result <- result %>% filter(dataset_generator == input$dataset_gen_filter)
+  }
+  
+  if (input$metric_filter != "All") {
+    result <- result %>% filter(metric == input$metric_filter)
+  }
+  
+  result %>% 
+    filter(execution_time_seconds >= input$time_range[1],
+           execution_time_seconds <= input$time_range[2])
+})
+
+renderPlotly({
+  req(nrow(filtered_data()) > 0)
+  
+  plot_ly(filtered_data(), 
+          x = ~execution_time_seconds,
+          y = ~score,
+          color = ~backend,
+          symbol = ~method,
+          type = "scatter",
+          mode = "markers",
+          text = ~paste("Dataset:", dataset_name, 
+                       "<br>Method:", method,
+                       "<br>Score:", round(score, 3),
+                       "<br>Time:", round(execution_time_seconds, 3), "s")) %>%
+    layout(title = "Score vs. Execution Time",
+           xaxis = list(title = "Execution Time (seconds)", type = "log"),
+           yaxis = list(title = "Score"))
+})
+```
+
+Row
+-----------------------------------------------------------------------
+
+### Data Table
+```{r}
+renderDT({
+  req(nrow(filtered_data()) > 0)
+  
+  filtered_data() %>%
+    select(backend, dataset_generator, dataset_name, method, metric, 
+           score, execution_time_seconds) %>%
+    arrange(desc(score)) %>%
+    datatable(options = list(
+      pageLength = 10,
+      autoWidth = TRUE
+    ))
+})
+```
+
+Dataset Analysis
+=====================================
+
+Row
+-----------------------------------------------------------------------
+
+### Performance by Dataset
+```{r}
+dataset_perf <- data %>%
+  group_by(dataset_generator, dataset_name, method) %>%
+  summarize(
+    avg_score = mean(score, na.rm = TRUE),
+    avg_time = mean(execution_time_seconds, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+plot_ly(dataset_perf, 
+        x = ~dataset_name, 
+        y = ~avg_score, 
+        color = ~method,
+        type = "bar") %>%
+  layout(title = "Average Score by Dataset and Method",
+         xaxis = list(title = "", categoryorder = "total descending"),
+         yaxis = list(title = "Average Score"),
+         barmode = "group")
+```
+
+Row
+-----------------------------------------------------------------------
+
+### Heatmap: Method Performance by Dataset
+```{r}
+# Use one metric for clarity
+one_metric <- data %>% 
+  filter(metric == levels(data$metric)[1])
+
+# Create heatmap data
+heatmap_data <- one_metric %>%
+  group_by(dataset_name, method) %>%
+  summarize(
+    avg_score = mean(score, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+plot_ly(heatmap_data,
+        x = ~method,
+        y = ~dataset_name,
+        z = ~avg_score,
+        type = "heatmap",
+        colorscale = "Viridis") %>%
+  layout(title = "Method Performance by Dataset",
+         xaxis = list(title = ""),
+         yaxis = list(title = ""))
+```
+
+Method Comparison
+=====================================
+
+Row {.tabset}
+-----------------------------------------------------------------------
+
+### Method Performance Comparison
+```{r}
+method_comparison <- data %>%
+  group_by(method, backend) %>%
+  summarize(
+    avg_score = mean(score, na.rm = TRUE),
+    std_dev = sd(score, na.rm = TRUE),
+    min_score = min(score, na.rm = TRUE),
+    max_score = max(score, na.rm = TRUE),
+    avg_time = mean(execution_time_seconds, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+plot_ly(method_comparison) %>%
+  add_trace(
+    x = ~method,
+    y = ~avg_score,
+    color = ~backend,
+    type = "bar",
+    error_y = list(
+      type = "data",
+      array = ~std_dev,
+      visible = TRUE
+    )
+  ) %>%
+  layout(title = "Average Score by Method",
+         xaxis = list(title = ""),
+         yaxis = list(title = "Average Score"))
+```
+
+### Method Execution Time Comparison
+```{r}
+plot_ly(method_comparison) %>%
+  add_trace(
+    x = ~method,
+    y = ~avg_time,
+    color = ~backend,
+    type = "bar"
+  ) %>%
+  layout(title = "Average Execution Time by Method",
+         xaxis = list(title = ""),
+         yaxis = list(title = "Execution Time (seconds)"))
+```
+
+### Method Radar Chart
+```{r}
+# Prepare data for radar chart
+radar_data <- method_comparison %>%
+  group_by(method) %>%
+  summarize(
+    score = mean(avg_score, na.rm = TRUE),
+    speed = 1 / mean(avg_time, na.rm = TRUE), # inverse of time (higher is better)
+    .groups = "drop"
+  ) %>%
+  # Scale values between 0 and 1
+  mutate(
+    score_scaled = rescale(score),
+    speed_scaled = rescale(speed)
+  )
+
+# Create radar chart data
+methods <- radar_data$method
+score <- radar_data$score_scaled
+speed <- radar_data$speed_scaled
+
+plot_ly(
+  type = 'scatterpolar',
+  fill = 'toself'
+) %>%
+  add_trace(
+    r = c(score, speed),
+    theta = c(rep("Score", length(score)), rep("Speed", length(speed))),
+    name = rep(methods, 2)
+  ) %>%
+  layout(
+    polar = list(
+      radialaxis = list(
+        visible = TRUE,
+        range = c(0, 1)
+      )
+    ),
+    title = "Method Comparison (Score vs Speed)"
+  )
+```
+
+### Method Rankings
+```{r}
+# Create rankings for each method
+rankings <- data %>%
+  group_by(method, dataset_name) %>%
+  summarize(
+    avg_score = mean(score, na.rm = TRUE),
+    avg_time = mean(execution_time_seconds, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(dataset_name) %>%
+  mutate(
+    score_rank = rank(-avg_score),
+    time_rank = rank(avg_time),
+    overall_rank = (score_rank + time_rank) / 2
+  ) %>%
+  group_by(method) %>%
+  summarize(
+    avg_score_rank = mean(score_rank, na.rm = TRUE),
+    avg_time_rank = mean(time_rank, na.rm = TRUE),
+    avg_overall_rank = mean(overall_rank, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(avg_overall_rank)
+
+datatable(rankings,
+          options = list(
+            pageLength = 20,
+            autoWidth = TRUE
+          ),
+          caption = "Method Rankings (lower is better)")
+```
