@@ -26,6 +26,70 @@ import numpy as np
 from pathlib import Path
 import warnings
 
+
+def process_run(base_dir, debug_mode=False):
+    # Extract backend and timestamp
+    backend, timestamp = extract_backend_timestamp(base_dir)
+    print(f"Detected backend: {backend}, timestamp: {timestamp}")
+
+    # Get directory name for tracking source
+    dir_name = os.path.basename(os.path.normpath(base_dir))
+
+    # Find all clustbench.scores.gz files
+    score_files = glob.glob(f'{base_dir}/**/clustbench.scores.gz', recursive=True)
+    print(f"Found {len(score_files)} score files")
+
+    # Process each file and collect results
+    results = []
+
+    # Cache for true_k and has_noise values to avoid repeated file reads
+    dataset_info_cache = {}
+
+    # Track files with duplicate k anomalies
+    duplicate_k_anomaly_files = []
+
+    for i, file_path in enumerate(score_files):
+        if i % 100 == 0 and i > 0:
+            print(f"Processed {i}/{len(score_files)} files...")
+        result = process_scores_file(file_path)
+        if result:
+            # Get dataset generator and name from the result
+            dataset_gen = result['dataset_generator']
+            dataset_name = result['dataset_name']
+
+            # Use cache to avoid repeated file reads
+            cache_key = f"{dataset_gen}_{dataset_name}"
+            if cache_key not in dataset_info_cache:
+                true_k, has_noise = extract_dataset_true_k_and_noise(base_dir, dataset_gen, dataset_name)
+                dataset_info_cache[cache_key] = (true_k, has_noise)
+                if debug_mode:
+                    print(f"Dataset {dataset_gen}_{dataset_name}: true_k={true_k}, has_noise={has_noise}")
+            else:
+                true_k, has_noise = dataset_info_cache[cache_key]
+
+            # Add true_k, has_noise, source directory, backend and timestamp to the result
+            result['true_k'] = true_k
+            result['has_noise'] = has_noise
+            result['source_dir'] = dir_name
+            result['backend'] = backend
+            result['run_timestamp'] = timestamp
+
+            # Extract score for k=true_k if available
+            score_for_true_k = None
+            true_k_str = f"k={true_k}"
+            if true_k_str in result:
+                score_for_true_k = result[true_k_str]
+            result['score'] = score_for_true_k
+
+            # Track duplicate k anomalies
+            if result.get('duplicate_k_anomaly', False):
+                duplicate_k_anomaly_files.append(file_path)
+                if debug_mode:
+                    print(f"DUPLICATE K ANOMALY DETECTED in file: {file_path}")
+
+            results.append(result)
+    return results, backend, timestamp, duplicate_k_anomaly_files, dir_name
+
 def extract_dataset_info(path):
     """Extract dataset generator and name from path or parameters.json"""
     # Try to get from directory name
@@ -329,107 +393,42 @@ def main():
     parser = argparse.ArgumentParser(
         description='Aggregate clustbench scores and detect anomalies from output directory',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Details:
-  - Extracts scores from clustbench.scores.gz files
-  - Determines true k value from each dataset's label file
-  - Finds execution time from clustbench_performance.txt files
-  - Detects duplicate k anomalies in score headers
-  - Creates aggregated file with all metrics for all methods
-
-Output columns:
-  - backend: Backend system used (extracted from directory name)
-  - run_timestamp: Timestamp of the run (extracted from directory name)
-  - dataset_generator, dataset_name: Dataset information
-  - true_k: Actual number of clusters in the dataset (from labels file)
-  - has_noise: Whether the dataset contains noise points (label 0)
-  - method: Clustering algorithm used
-  - metric: Evaluation metric name
-  - score: Score for k=true_k (if available)
-  - execution_time_seconds: Time taken by the algorithm
-  - duplicate_k_anomaly: Flag for duplicate k values with different scores
-  - k=X columns: Scores for each k value
-        """
     )
-    parser.add_argument('--root', '-r', type=str, default='out_apptainer-202505301205',
-                        help='Root directory containing clustbench output')
+    parser.add_argument('root_dirs', nargs='+', help='Root directories containing clustbench output')
+    parser.add_argument('--out_dir', type=str, default='.', help='Output directory for aggregated results')
     parser.add_argument('--debug', '-d', action='store_true',
                         help='Enable debug output (shows detailed file paths and anomaly information)')
     parser.add_argument('--format', '-f', type=str, choices=['csv', 'parquet', 'both'], default='csv',
                         help='Output format: csv (224KB), parquet (70KB), or both (default: csv)')
     args = parser.parse_args()
 
-    # Base directory
-    base_dir = args.root
-    debug_mode = args.debug
+    all_results = []
+    all_backends = []
+    all_timestamps = []
+    all_duplicate_k_anomaly_files = []
+    source_dirs = []
 
-    # Extract backend and timestamp
-    backend, timestamp = extract_backend_timestamp(base_dir)
-    print(f"Detected backend: {backend}, timestamp: {timestamp}")
-
-    # Find all clustbench.scores.gz files
-    score_files = glob.glob(f'{base_dir}/**/clustbench.scores.gz', recursive=True)
-    print(f"Found {len(score_files)} score files")
-
-    # Process each file and collect results
-    results = []
-
-    # Cache for true_k and has_noise values to avoid repeated file reads
-    dataset_info_cache = {}
-
-    # Track files with duplicate k anomalies
-    duplicate_k_anomaly_files = []
-
-    for i, file_path in enumerate(score_files):
-        if i % 100 == 0 and i > 0:
-            print(f"Processed {i}/{len(score_files)} files...")
-        result = process_scores_file(file_path)
-        if result:
-            # Get dataset generator and name from the result
-            dataset_gen = result['dataset_generator']
-            dataset_name = result['dataset_name']
-
-            # Use cache to avoid repeated file reads
-            cache_key = f"{dataset_gen}_{dataset_name}"
-            if cache_key not in dataset_info_cache:
-                true_k, has_noise = extract_dataset_true_k_and_noise(base_dir, dataset_gen, dataset_name)
-                dataset_info_cache[cache_key] = (true_k, has_noise)
-                if debug_mode:
-                    print(f"Dataset {dataset_gen}_{dataset_name}: true_k={true_k}, has_noise={has_noise}")
-            else:
-                true_k, has_noise = dataset_info_cache[cache_key]
-
-            # Add true_k and has_noise to the result
-            result['true_k'] = true_k
-            result['has_noise'] = has_noise
-
-            # Extract score for k=true_k if available
-            score_for_true_k = None
-            true_k_str = f"k={true_k}"
-            if true_k_str in result:
-                score_for_true_k = result[true_k_str]
-            result['score'] = score_for_true_k
-
-            # Track duplicate k anomalies
-            if result.get('duplicate_k_anomaly', False):
-                duplicate_k_anomaly_files.append(file_path)
-                if debug_mode:
-                    print(f"DUPLICATE K ANOMALY DETECTED in file: {file_path}")
-
-            results.append(result)
+    for base_dir in args.root_dirs:
+        results, backend, timestamp, duplicate_k_anomaly_files, dir_name = process_run(base_dir, args.debug)
+        if results:
+            all_results.extend(results)
+            if backend not in all_backends:
+                all_backends.append(backend)
+            if timestamp not in all_timestamps:
+                all_timestamps.append(timestamp)
+            all_duplicate_k_anomaly_files.extend(duplicate_k_anomaly_files)
+            source_dirs.append(dir_name)
 
     # Convert to DataFrame
-    if results:
-        df = pd.DataFrame(results)
+    if all_results:
+        df = pd.DataFrame(all_results)
 
-        # Add backend and timestamp columns
-        backend, timestamp = extract_backend_timestamp(base_dir)
-        df['backend'] = backend
-        df['run_timestamp'] = timestamp
+        # Backend and timestamp are already in individual records
+        # No need to add them here since we're preserving the original values
 
         # Organize columns - metadata first, then k values
         all_columns = df.columns.tolist()
-        meta_columns = ['backend', 'run_timestamp', 'dataset_generator', 'dataset_name', 'true_k', 'has_noise', 'method', 'metric', 'score', 'execution_time_seconds', 'duplicate_k_anomaly']
+        meta_columns = ['source_dir', 'backend', 'run_timestamp', 'dataset_generator', 'dataset_name', 'true_k', 'has_noise', 'method', 'metric', 'score', 'execution_time_seconds', 'duplicate_k_anomaly']
         k_columns = [col for col in all_columns if col not in meta_columns]
 
         # Sort k columns numerically if they follow 'k=X' pattern
@@ -447,61 +446,41 @@ Output columns:
         df = df[meta_columns + k_columns]
 
         # Base output filename without extension
-        base_output_file = f'clustbench_aggregated_scores_{backend}_{timestamp}' if backend and timestamp else 'clustbench_aggregated_scores'
+        if len(source_dirs) == 1:
+            # Single directory case
+            dir_name = source_dirs[0]
+            backend = all_backends[0] if all_backends else None
+            timestamp = all_timestamps[0] if all_timestamps else None
+            base_output_file = f'clustbench_aggregated_scores_{dir_name}_{backend}_{timestamp}' if backend and timestamp else f'clustbench_aggregated_scores_{dir_name}'
+        else:
+            # Multiple directory case
+            current_timestamp = pd.Timestamp.now().strftime('%Y%m%d%H%M')
+            backends_str = '_'.join(all_backends) if len(all_backends) <= 3 else f'{len(all_backends)}_backends'
+            base_output_file = f'clustbench_aggregated_multi_{len(source_dirs)}_dirs_{backends_str}_{current_timestamp}'
 
-        # Save outputs based on format selection
-        if args.format == 'csv' or args.format == 'both':
-            csv_output_file = f"{base_output_file}.csv"
+        # Create output directory if it doesn't exist
+        if not os.path.exists(args.out_dir):
+            os.makedirs(args.out_dir)
+            
+        # Output to CSV
+        if args.format in ['csv', 'both']:
+            csv_output_file = os.path.join(args.out_dir, f"{base_output_file}.csv")
             df.to_csv(csv_output_file, index=False)
             print(f"Aggregated scores saved to {csv_output_file}")
 
-        if args.format == 'parquet' or args.format == 'both':
-            try:
-                parquet_output_file = f"{base_output_file}.parquet"
-                df.to_parquet(parquet_output_file, index=False)
-                print(f"Aggregated scores saved to {parquet_output_file}")
-            except Exception as e:
-                warnings.warn(f"Could not save to parquet format: {e}. You may need to install pyarrow or fastparquet.")
+        # Output to Parquet
+        if args.format in ['parquet', 'both']:
+            parquet_output_file = os.path.join(args.out_dir, f"{base_output_file}.parquet")
+            df.to_parquet(parquet_output_file, index=False)
+            print(f"Parquet output written to {parquet_output_file}")
 
-        # Show a summary
-        print(f"\nProcessed {len(results)} out of {len(score_files)} score files")
-        print(f"Dataset generators: {df['dataset_generator'].unique()}")
-        print(f"Unique datasets: {df['dataset_name'].nunique()}")
-        print(f"Unique methods: {df['method'].nunique()}")
-        print(f"Unique metrics: {df['metric'].nunique()}")
-
-        # Check for and report k value anomalies
-        # Convert boolean columns to numeric for counting
-        df['duplicate_k_anomaly'] = df['duplicate_k_anomaly'].astype(int)
-
-        duplicate_anomaly_count = df['duplicate_k_anomaly'].sum()
-
-        if duplicate_anomaly_count > 0:
-            print(f"\n⚠️ WARNING: Detected {duplicate_anomaly_count} rows with duplicate k anomalies!")
-            print("These are cases where the same k value appears multiple times in the header")
-            print("with significantly different scores (difference > 1E-3).")
-            print("This indicates a potential issue with the score file generation.")
-
-            # Report duplicate k anomalies
-            if duplicate_anomaly_count > 0:
-                duplicate_anomaly_df = df[df['duplicate_k_anomaly'] == 1].copy()
-                duplicate_anomaly_df['method_display'] = duplicate_anomaly_df['method'].fillna("NO_METHOD")
-                duplicate_groups = duplicate_anomaly_df.groupby(['dataset_generator', 'dataset_name', 'method_display', 'metric']).size()
-                print("\nDuplicate k anomalies by (dataset_generator, dataset_name, method, metric):")
-                for index, count in duplicate_groups.items():
-                    gen, name, method, metric = index
-                    method_display = "NO_METHOD" if pd.isna(method) or method == "" else method
-                    print(f"  - {gen}, {name}, {method_display}, {metric}")
-
-                if debug_mode:
-                    print("\nFiles with duplicate k anomalies:")
-                    for i, file_path in enumerate(duplicate_k_anomaly_files):
-                        print(f"  {i+1}. {Path(file_path).relative_to(Path(base_dir))}")
-                # Detailed anomaly information is handled in the files with duplicate k anomalies section above
-        print("\nExample rows:")
-        print(df.head())
+        if args.debug and all_duplicate_k_anomaly_files:
+            print("\nFiles with Duplicate K Anomaly:")
+            for file in all_duplicate_k_anomaly_files:
+                print(f"- {file}")
     else:
-        print("No results found")
+        print("No matching score files found.  Nothing to do.")
+
 
 if __name__ == "__main__":
     main()
