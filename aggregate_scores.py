@@ -8,23 +8,31 @@ Usage:
   python aggregate_scores.py --root <output_directory> [--format csv|parquet|both] [--debug]
 
 Examples:
-  python aggregate_scores.py --root out_apptainer-202505301205
-  python aggregate_scores.py --root out_apptainer-202505301205 --format parquet
-  python aggregate_scores.py --root out_apptainer-202505301205 --format both --debug
+  python aggregate_scores.py --format both out_apptainer-202505301205
+  python aggregate_scores.py out_apptainer-202505301205 --format parquet
+  python aggregate_scores.py out_apptainer-202505301205 --format both --debug
 """
 
-import os
+import argparse
+import csv
 import glob
 import gzip
 import json
-import pandas as pd
+import os
 import re
-import csv
-import argparse
-from collections import defaultdict
-import numpy as np
-from pathlib import Path
 import warnings
+import multiprocessing
+
+from collections import defaultdict
+from functools import partial
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
+
+# Define a worker function for the process pool
+def process_dir(base_dir, debug_mode):
+    return process_run(base_dir, debug_mode)
 
 
 def process_run(base_dir, debug_mode=False):
@@ -400,6 +408,8 @@ def main():
                         help='Enable debug output (shows detailed file paths and anomaly information)')
     parser.add_argument('--format', '-f', type=str, choices=['csv', 'parquet', 'both'], default='csv',
                         help='Output format: csv (224KB), parquet (70KB), or both (default: csv)')
+    parser.add_argument('--cores', '-c', type=int, default=multiprocessing.cpu_count(),
+                        help='Number of CPU cores to use for parallel processing (default: all available cores)')
     args = parser.parse_args()
 
     all_results = []
@@ -408,16 +418,39 @@ def main():
     all_duplicate_k_anomaly_files = []
     source_dirs = []
 
-    for base_dir in args.root_dirs:
-        results, backend, timestamp, duplicate_k_anomaly_files, dir_name = process_run(base_dir, args.debug)
-        if results:
-            all_results.extend(results)
-            if backend not in all_backends:
-                all_backends.append(backend)
-            if timestamp not in all_timestamps:
-                all_timestamps.append(timestamp)
-            all_duplicate_k_anomaly_files.extend(duplicate_k_anomaly_files)
-            source_dirs.append(dir_name)
+    # If multiple cores are requested and we have multiple directories, use parallel processing
+    if args.cores > 1 and len(args.root_dirs) > 1:
+        print(f"Using {args.cores} CPU cores for parallel processing...")
+        # Create a process pool with the specified number of cores
+        with multiprocessing.Pool(processes=args.cores) as pool:
+            # Process each directory in parallel
+            process_results = pool.map(partial(process_dir, debug_mode=args.debug), args.root_dirs)
+
+            # Collect results
+            for result_tuple in process_results:
+                results, backend, timestamp, duplicate_k_anomaly_files, dir_name = result_tuple
+                if results:
+                    all_results.extend(results)
+                    if backend not in all_backends:
+                        all_backends.append(backend)
+                    if timestamp not in all_timestamps:
+                        all_timestamps.append(timestamp)
+                    all_duplicate_k_anomaly_files.extend(duplicate_k_anomaly_files)
+                    source_dirs.append(dir_name)
+    else:
+        # Process sequentially if only one core is requested or if there's only one directory
+        if args.cores == 1:
+            print("Using single-core processing...")
+        for base_dir in args.root_dirs:
+            results, backend, timestamp, duplicate_k_anomaly_files, dir_name = process_run(base_dir, args.debug)
+            if results:
+                all_results.extend(results)
+                if backend not in all_backends:
+                    all_backends.append(backend)
+                if timestamp not in all_timestamps:
+                    all_timestamps.append(timestamp)
+                all_duplicate_k_anomaly_files.extend(duplicate_k_anomaly_files)
+                source_dirs.append(dir_name)
 
     # Convert to DataFrame
     if all_results:
@@ -461,7 +494,7 @@ def main():
         # Create output directory if it doesn't exist
         if not os.path.exists(args.out_dir):
             os.makedirs(args.out_dir)
-            
+
         # Output to CSV
         if args.format in ['csv', 'both']:
             csv_output_file = os.path.join(args.out_dir, f"{base_output_file}.csv")
