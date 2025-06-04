@@ -5,9 +5,8 @@ This directory contains Nix configuration files for the clustbench-analysis proj
 ## Files
 
 - `default.nix` - Core package definitions for R and Python environments
-- `docker.nix` - Docker image builder using the same package definitions
 - `docker-entrypoint.sh` - Entrypoint script for the Docker container
-- `../docker.nix` - Convenience wrapper for building the Docker image
+- `../docker.nix` - Main Docker image builder for the project
 
 ## Development Environment
 
@@ -33,11 +32,10 @@ nix-build docker.nix -A image
 docker load < result
 ```
 
-Or use the convenience script:
+Or use the rebuild script:
 
 ```bash
-nix-build docker.nix -A shell
-./result/bin/build-and-load-docker
+./rebuild_docker.sh
 ```
 
 This will create a Docker image named `clustbench-analysis:latest` that includes:

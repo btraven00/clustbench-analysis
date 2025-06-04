@@ -57,7 +57,7 @@ R --quiet --vanilla -e '
         write(profile_content, file=".Rprofile", append=TRUE)
       } else {
         cat("ERROR: Still cannot load package", pkg, "\n")
-        cat("Try running ./debug_r_env.R for more information\n")
+        cat("Try running Rscript verify_docker_deps.R for more information\n")
         exit(1)
       }
     } else {
