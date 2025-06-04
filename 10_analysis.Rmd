@@ -45,7 +45,7 @@ source("02_aggregation.R")
 
 This analysis examines clustering benchmark results from several ClustBench omnibenchmark runs.
 
-For now, I'm examining only a partial run of the benchmark, for a few selected backends and just the FCPS methods.
+For now, I'm examining only a partial run of the benchmark, for a few selected backends and just the FCPS methods (that had proven problematic before)
 
 ## Load and Prepare Data
 
@@ -86,6 +86,50 @@ data %>%
   kable() %>%
   kable_styling()
 ```
+
+## Consistency of method runtime
+
+Do note that here we've collected the runtime (in seconds) for the method. So it's expected
+that each row has a repeated value for the same dataset x backend x run x method.
+
+```{r consistency-runtime}
+# Aggregate by dataset_generator, dataset_name, and method to check score consistency across runs
+consistency_check_runtime <- data %>%
+  mutate(dataset = paste(dataset_generator, dataset_name, sep = "/")) %>%
+  group_by(dataset, method, backend) %>%
+  summarize(
+    n_runs = n_distinct(run_timestamp),
+    n_runtime = n_distinct(execution_time_seconds),
+    min_score = min(execution_time_seconds, na.rm = TRUE),
+    max_score = max(execution_time_seconds, na.rm = TRUE),
+    score_range = max_score - min_score,
+    is_consistent = score_range < 1e-9,  # Using small epsilon for floating point comparison
+    .groups = "drop"
+  ) %>%
+  arrange(desc(score_range))
+
+
+```
+
+## Consistency of metric scores
+
+```{r consistency-metrics}
+# Aggregate by dataset_generator, dataset_name, and method to check score consistency across runs
+consistency_check_metrics <- data %>%
+  mutate(dataset = paste(dataset_generator, dataset_name, sep = "/")) %>%
+  group_by(dataset, method, backend, metric) %>%
+  summarize(
+    n_runs = n_distinct(run_timestamp),
+    min_score = min(score, na.rm = TRUE),
+    max_score = max(score, na.rm = TRUE),
+    score_range = max_score - min_score,
+    is_consistent = score_range < 1e-9,  # Using small epsilon for floating point comparison
+    .groups = "drop"
+  ) %>%
+  arrange(desc(score_range))
+
+```
+
 
 # Score Analysis
 
@@ -169,6 +213,7 @@ data %>%
     x = "Backend",
     y = "Execution Time (seconds)"
   ) +
+  scale_y_log10() +
   theme_minimal() +
   theme(legend.position = "none")
 ```
@@ -290,6 +335,8 @@ consistency_metrics %>%
 ```
 
 This analysis examines the consistency of scores across multiple repetitions of the same dataset, method, and metric combination. A score range of 0 indicates perfect consistency (all repetitions produced identical scores), while larger values suggest variability in the algorithm's output.
+
+TODO: filter NAs.
 
 # Conclusions
 

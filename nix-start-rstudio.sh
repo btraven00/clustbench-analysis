@@ -89,6 +89,13 @@ echo " - R_HOME: $R_HOME"
 echo ""
 echo "Packages have been verified. RStudio should work correctly."
 
+# Set environment variables to fix OpenGL/graphics issues
+export RSTUDIO_CHROMIUM_ARGUMENTS="--disable-gpu --disable-software-rasterizer"
+export LIBGL_ALWAYS_SOFTWARE=1
+export QT_QPA_PLATFORM=xcb
+
+echo "Applied graphics fixes for RStudio (OpenGL/GPU issues)"
+
 # Launch RStudio with the project
 if [ -f "${PROJECT_DIR}/clustbench-analysis.Rproj" ]; then
   rstudio "${PROJECT_DIR}/clustbench-analysis.Rproj" &

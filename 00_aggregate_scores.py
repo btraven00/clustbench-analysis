@@ -36,67 +36,134 @@ def process_dir(base_dir, debug_mode):
 
 
 def process_run(base_dir, debug_mode=False):
-    # Extract backend and timestamp
-    backend, timestamp = extract_backend_timestamp(base_dir)
-    print(f"Detected backend: {backend}, timestamp: {timestamp}")
+    """
+    Process a run directory containing clustbench results.
+    
+    This function handles both individual run directories (out_BACKEND-TIMESTAMP)
+    and parent directories containing multiple run directories.
+    """
+    all_results_from_base_dir = []
+    all_duplicate_k_anomaly_files_from_base_dir = []
+    backends_found = set()
+    timestamps_found = set()
 
-    # Get directory name for tracking source
-    dir_name = os.path.basename(os.path.normpath(base_dir))
+    # First check if the input directory is itself a run directory
+    base_dir_name = os.path.basename(os.path.normpath(base_dir))
+    if base_dir_name.startswith('out_') and '-' in base_dir_name:
+        run_dirs = [base_dir]
+    else:
+        # If not, look for run directories within it
+        run_dirs_pattern = os.path.join(base_dir, 'out_*-*')
+        run_dirs = glob.glob(run_dirs_pattern)
 
-    # Find all clustbench.scores.gz files
-    score_files = glob.glob(f'{base_dir}/**/clustbench.scores.gz', recursive=True)
-    print(f"Found {len(score_files)} score files")
+    if debug_mode:
+        print(f"Processing directory: {base_dir}")
+        print(f"Found run directories: {run_dirs}")
 
-    # Process each file and collect results
-    results = []
+    if not run_dirs:
+        print(f"No run directories found in or matching {base_dir}")
+        return [], None, None, [], os.path.basename(os.path.normpath(base_dir))
 
-    # Cache for true_k and has_noise values to avoid repeated file reads
-    dataset_info_cache = {}
+    for run_dir in run_dirs:
+        # Extract backend and timestamp from the run directory name
+        backend, timestamp = extract_backend_timestamp(run_dir)
+        dir_name = os.path.basename(os.path.normpath(run_dir)) # Use run_dir name as source_dir
 
-    # Track files with duplicate k anomalies
-    duplicate_k_anomaly_files = []
+        if backend and timestamp:
+            print(f"Processing run directory: {run_dir} (Backend: {backend}, Timestamp: {timestamp})")
+            backends_found.add(backend)
+            timestamps_found.add(timestamp)
 
-    for i, file_path in enumerate(score_files):
-        if i % 100 == 0 and i > 0:
-            print(f"Processed {i}/{len(score_files)} files...")
-        result = process_scores_file(file_path)
-        if result:
-            # Get dataset generator and name from the result
-            dataset_gen = result['dataset_generator']
-            dataset_name = result['dataset_name']
+            # Find all clustbench.scores.gz files within this specific run directory
+            score_files = glob.glob(f'{run_dir}/**/clustbench.scores.gz', recursive=True)
+            print(f"Found {len(score_files)} score files in {run_dir}")
 
-            # Use cache to avoid repeated file reads
-            cache_key = f"{dataset_gen}_{dataset_name}"
-            if cache_key not in dataset_info_cache:
-                true_k, has_noise = extract_dataset_true_k_and_noise(base_dir, dataset_gen, dataset_name)
-                dataset_info_cache[cache_key] = (true_k, has_noise)
-                if debug_mode:
-                    print(f"Dataset {dataset_gen}_{dataset_name}: true_k={true_k}, has_noise={has_noise}")
-            else:
-                true_k, has_noise = dataset_info_cache[cache_key]
+            # Process each file and collect results for this run directory
+            results_from_run_dir = []
+            dataset_info_cache = {} # Cache is per run directory
 
-            # Add true_k, has_noise, source directory, backend and timestamp to the result
-            result['true_k'] = true_k
-            result['has_noise'] = has_noise
-            result['source_dir'] = dir_name
-            result['backend'] = backend
-            result['run_timestamp'] = timestamp
+            for i, file_path in enumerate(score_files):
+                if debug_mode and i % 100 == 0 and i > 0:
+                     print(f"  Processing {i}/{len(score_files)} files in {run_dir}...")
 
-            # Extract score for k=true_k if available
-            score_for_true_k = None
-            true_k_str = f"k={true_k}"
-            if true_k_str in result:
-                score_for_true_k = result[true_k_str]
-            result['score'] = score_for_true_k
+                # Pass backend and timestamp to process_scores_file if needed, or ensure it's added later
+                # process_scores_file extracts info from the file_path itself,
+                # backend and timestamp are linked to the run_dir containing the file_path
+                result = process_scores_file(file_path)
 
-            # Track duplicate k anomalies
-            if result.get('duplicate_k_anomaly', False):
-                duplicate_k_anomaly_files.append(file_path)
-                if debug_mode:
-                    print(f"DUPLICATE K ANOMALY DETECTED in file: {file_path}")
+                if result:
+                    # Get dataset generator and name from the result (extracted from file_path)
+                    dataset_gen = result['dataset_generator']
+                    dataset_name = result['dataset_name']
 
-            results.append(result)
-    return results, backend, timestamp, duplicate_k_anomaly_files, dir_name
+                    # Use cache for true_k and has_noise (cache is per run_dir)
+                    cache_key = f"{dataset_gen}_{dataset_name}"
+                    if cache_key not in dataset_info_cache:
+                        # Pass the current run_dir to extract_dataset_true_k_and_noise
+                        true_k, has_noise = extract_dataset_true_k_and_noise(run_dir, dataset_gen, dataset_name)
+                        dataset_info_cache[cache_key] = (true_k, has_noise)
+                        if debug_mode:
+                            print(f"  Dataset {dataset_gen}_{dataset_name} in {run_dir}: true_k={true_k}, has_noise={has_noise}")
+                    else:
+                        true_k, has_noise = dataset_info_cache[cache_key]
+
+                    # Add true_k, has_noise, source directory, backend and timestamp to the result
+                    # These are specific to the current run_dir
+                    result['true_k'] = true_k
+                    result['has_noise'] = has_noise
+                    result['source_dir'] = dir_name # Name of the run directory (e.g., out_apptainer-TIMESTAMP)
+                    result['backend'] = backend     # Backend from run directory name
+                    result['run_timestamp'] = timestamp # Timestamp from run directory name
+
+                    # Extract score for k=true_k if available
+                    # This logic is already in process_scores_file, but we ensure 'score' key exists
+                    # Even if true_k score is missing, process_scores_file should return None for 'score'
+                    # No need to re-calculate score_for_true_k here if process_scores_file already does it.
+                    # Ensure 'score' key is present even if processing failed partially
+                    if 'score' not in result:
+                         score_for_true_k = None
+                         if true_k is not None:
+                             true_k_str = f"k={true_k}"
+                             if true_k_str in result and result[true_k_str] is not None:
+                                 score_for_true_k = result[true_k_str]
+                         result['score'] = score_for_true_k # Add or update score
+
+                    # Ensure consistency flags are present
+                    if 'missing_true_k_score' not in result:
+                         result['missing_true_k_score'] = (true_k is not None and result.get('score') is None)
+                    if 'empty_file' not in result:
+                         result['empty_file'] = False # Should be set by process_scores_file if file was empty
+
+                    # Collect results for this run directory
+                    results_from_run_dir.append(result)
+
+            # Extend the overall results list with results from this run directory
+            all_results_from_base_dir.extend(results_from_run_dir)
+            # Note: duplicate_k_anomaly_files were handled within process_scores_file now
+
+        else:
+            print(f"Warning: Skipping directory {run_dir} as it does not match expected format 'out_BACKEND-TIMESTAMP'")
+
+    # Return aggregated results from all run directories within this base_dir
+    # We can return the first found backend/timestamp or None if none were found.
+    # For simplicity, let's convert the sets to sorted lists and return the first element or None.
+    backend_list = sorted(list(backends_found))
+    timestamp_list = sorted(list(timestamps_found))
+
+    # Collect duplicate_k_anomaly_files from all results
+    # We need to re-collect these as they are now part of the result dictionary
+    all_duplicate_k_anomaly_files_from_base_dir = [
+        res['file_path'] # Assuming we add file_path to result in process_scores_file
+        for res in all_results_from_base_dir if res.get('duplicate_k_anomaly', False) and 'file_path' in res
+    ]
+
+
+    # Return aggregated results, a representative backend/timestamp, aggregated anomaly files, and original base_dir name
+    return all_results_from_base_dir, \
+           backend_list[0] if backend_list else None, \
+           timestamp_list[0] if timestamp_list else None, \
+           all_duplicate_k_anomaly_files_from_base_dir, \
+           os.path.basename(os.path.normpath(base_dir))
 
 def extract_dataset_info(path):
     """Extract dataset generator and name from path or parameters.json"""
@@ -193,45 +260,123 @@ def extract_metric_info(path):
 
 def find_method_performance(file_path):
     """Find and extract execution time (seconds) from method's clustbench_performance.txt"""
+    # Debug info
+    debug_info = {"file": file_path}
+
     try:
         # Navigate up from score file to find the method directory
         # Scores are in: .../method-XXX/metrics/partition_metrics/metric-YYY/clustbench.scores.gz
-        current_dir = os.path.dirname(file_path)  # metric-YYY directory
 
-        # If we're already at the method level, use this directory
-        if "method-" in current_dir:
-            method_dir = current_dir
-        else:
-            # Navigate up to partition_metrics
-            partition_metrics_dir = os.path.dirname(current_dir)
-            # Navigate up to metrics
-            metrics_dir = os.path.dirname(partition_metrics_dir)
-            # Navigate up to method
-            method_dir = os.path.dirname(metrics_dir)
+        # Start with the metric directory
+        current_dir = os.path.dirname(file_path)
+        debug_info["metric_dir"] = current_dir
 
-        # Check for the performance file
+        # Find the method directory by navigating upwards until we find a directory with 'method-' in its name
+        method_dir = None
+        max_levels = 10  # Safety to avoid infinite loops
+        levels = 0
+        test_dir = current_dir
+
+        while levels < max_levels:
+            # Check if we're at method level
+            basename = os.path.basename(test_dir)
+            if basename.startswith('method-') or 'method-' in basename:
+                method_dir = test_dir
+                debug_info["found_at_level"] = levels
+                break
+
+            # If we reach the root directory, stop
+            if test_dir == os.path.dirname(test_dir):
+                debug_info["reached_root"] = True
+                break
+
+            # Go up one level
+            test_dir = os.path.dirname(test_dir)
+            levels += 1
+
+        # If we couldn't find a method directory, try the alternative approach
+        if method_dir is None:
+            debug_info["first_approach_failed"] = True
+            # Try the previous approach as fallback
+            if "method-" in current_dir:
+                method_dir = current_dir
+                debug_info["fallback_direct"] = True
+            else:
+                try:
+                    # Navigate up to partition_metrics
+                    partition_metrics_dir = os.path.dirname(current_dir)
+                    debug_info["partition_metrics_dir"] = partition_metrics_dir
+                    # Navigate up to metrics
+                    metrics_dir = os.path.dirname(partition_metrics_dir)
+                    debug_info["metrics_dir"] = metrics_dir
+                    # Navigate up to method
+                    method_dir = os.path.dirname(metrics_dir)
+                    debug_info["fallback_path"] = True
+                except Exception as e:
+                    debug_info["fallback_error"] = str(e)
+                    # If this fails, we'll return None at the end
+                    pass
+
+        # If we still don't have a method directory, give up
+        if method_dir is None:
+            debug_info["no_method_dir"] = True
+            print(f"Could not find method directory for {file_path}")
+            return None
+
+        debug_info["method_dir_before"] = method_dir
+
+        # Check for symlinks in the method directory path and resolve them if needed
+        if os.path.islink(method_dir):
+            debug_info["is_symlink"] = True
+            method_dir = os.path.realpath(method_dir)
+            debug_info["method_dir_after"] = method_dir
+
+        # Check for the performance file at the method level
         perf_file = os.path.join(method_dir, 'clustbench_performance.txt')
+        debug_info["perf_file"] = perf_file
 
         if os.path.exists(perf_file):
+            debug_info["perf_file_exists"] = True
             with open(perf_file, 'r') as f:
                 # Read the header line to get column positions
                 header = f.readline().strip().split('\t')
+                debug_info["header"] = header
                 # Read the data line
                 data_line = f.readline().strip()
+                debug_info["data_line"] = data_line
                 if data_line:
                     data = data_line.split('\t')
+                    debug_info["data"] = data
 
                     # Find the 's' (seconds) column index
                     if 's' in header:
                         s_index = header.index('s')
+                        debug_info["s_index"] = s_index
                         if s_index < len(data):
                             try:
-                                return float(data[s_index])
+                                time_value = float(data[s_index])
+                                debug_info["time_value"] = time_value
+                                # Print debug info for a sample of files
+                                if hash(file_path) % 1000 == 0:
+                                    print(f"DEBUG: {debug_info}")
+                                return time_value
                             except ValueError:
-                                pass
+                                debug_info["value_error"] = True
+                        else:
+                            debug_info["index_out_of_range"] = True
+                    else:
+                        debug_info["no_s_column"] = True
+                else:
+                    debug_info["empty_data_line"] = True
+        else:
+            debug_info["perf_file_missing"] = True
+
     except Exception as e:
+        debug_info["exception"] = str(e)
         print(f"Error reading method performance file for {file_path}: {e}")
 
+    # Print debug info for cases where we didn't find a time
+    print(f"DEBUG (no time): {debug_info}")
     return None
 
 def process_scores_file(file_path):
@@ -244,6 +389,8 @@ def process_scores_file(file_path):
     3. Parses the scores file to extract k-value scores
     4. Detects duplicate k values with significantly different scores
     """
+    # Debug processing every 1000th file to avoid too much output
+    debug_this_file = hash(file_path) % 1000 == 0
     try:
         # Extract information from the path
         dataset_gen, dataset_name = extract_dataset_info(file_path)
@@ -252,16 +399,64 @@ def process_scores_file(file_path):
 
         # Extract performance time (seconds) from the method directory
         execution_time = find_method_performance(file_path)
+        if debug_this_file:
+            print(f"DEBUG processing {file_path}, found execution_time: {execution_time}")
 
         # Read the gzipped CSV file
         with gzip.open(file_path, 'rt') as f:
+            # Check if the file is empty
+            content = f.read()
+            if not content.strip():
+                print(f"Warning: Empty file encountered: {file_path}")
+                # Create result with NAs for missing values
+                return {
+                    'dataset_generator': dataset_gen,
+                    'dataset_name': dataset_name,
+                    'method': method,
+                    'metric': metric,
+                    'execution_time_seconds': execution_time,
+                    'duplicate_k_anomaly': False,
+                    'score': None,  # NA for score
+                    'empty_file': True,
+                    'missing_true_k_score': False
+                }
+
+            # Reset file pointer to beginning
+            f.seek(0)
+
             # Read the header and data
             reader = csv.reader(f)
-            header = next(reader)
-            data_rows = list(reader)
+            try:
+                header = next(reader)
+                data_rows = list(reader)
+            except StopIteration:
+                print(f"Warning: CSV file has no header or data: {file_path}")
+                # Create result with NAs for missing values
+                return {
+                    'dataset_generator': dataset_gen,
+                    'dataset_name': dataset_name,
+                    'method': method,
+                    'metric': metric,
+                    'execution_time_seconds': execution_time,
+                    'duplicate_k_anomaly': False,
+                    'score': None,  # NA for score
+                    'empty_file': True,
+                    'missing_true_k_score': False
+                }
 
             if len(data_rows) == 0:
-                return None
+                # Create result with NAs for missing values
+                return {
+                    'dataset_generator': dataset_gen,
+                    'dataset_name': dataset_name,
+                    'method': method,
+                    'metric': metric,
+                    'execution_time_seconds': execution_time,
+                    'duplicate_k_anomaly': False,
+                    'score': None,  # NA for score
+                    'empty_file': True,
+                    'missing_true_k_score': False
+                }
 
             # Process the data
             data = data_rows[0]  # Assuming single row of values
@@ -298,7 +493,9 @@ def process_scores_file(file_path):
                 'method': method,
                 'metric': metric,
                 'execution_time_seconds': execution_time,
-                'duplicate_k_anomaly': duplicate_k_anomaly
+                'duplicate_k_anomaly': duplicate_k_anomaly,
+                'empty_file': False,
+                'missing_true_k_score': False
             }
 
             # Add k values from header and corresponding scores
@@ -313,7 +510,11 @@ def process_scores_file(file_path):
 
             return result
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
         print(f"Error processing {file_path}: {e}")
+        print(f"Full error details:\n{error_details}")
+        # Continue processing other files
         return None
 
 def extract_backend_timestamp(directory_name):
@@ -322,6 +523,7 @@ def extract_backend_timestamp(directory_name):
     match = re.match(r'out_([^-]+)-(\d+)', os.path.basename(directory_name))
     if match:
         return match.group(1), match.group(2)
+    # Return None, None if the pattern doesn't match
     return None, None
 
 def extract_dataset_true_k_and_noise(base_dir, dataset_gen, dataset_name):
@@ -461,7 +663,7 @@ def main():
 
         # Organize columns - metadata first, then k values
         all_columns = df.columns.tolist()
-        meta_columns = ['source_dir', 'backend', 'run_timestamp', 'dataset_generator', 'dataset_name', 'true_k', 'has_noise', 'method', 'metric', 'score', 'execution_time_seconds', 'duplicate_k_anomaly']
+        meta_columns = ['source_dir', 'backend', 'run_timestamp', 'dataset_generator', 'dataset_name', 'true_k', 'has_noise', 'method', 'metric', 'score', 'execution_time_seconds', 'duplicate_k_anomaly', 'empty_file', 'missing_true_k_score']
         k_columns = [col for col in all_columns if col not in meta_columns]
 
         # Sort k columns numerically if they follow 'k=X' pattern
@@ -477,6 +679,36 @@ def main():
 
         # Reorder columns
         df = df[meta_columns + k_columns]
+
+        # Count empty files and missing true_k scores for reporting
+        empty_file_count = sum(1 for result in all_results if result.get('empty_file', False))
+        missing_true_k_count = sum(1 for result in all_results if result.get('missing_true_k_score', False))
+
+        if empty_file_count > 0:
+            print(f"Warning: Found {empty_file_count} empty files out of {len(all_results)} total files")
+
+        if missing_true_k_count > 0:
+            print(f"Warning: Found {missing_true_k_count} entries missing true_k score out of {len(all_results)} total files")
+
+        # Count empty files and missing scores for reporting
+        empty_file_count = df['empty_file'].sum()
+        missing_true_k_score_count = df['missing_true_k_score'].sum()
+
+        if empty_file_count > 0:
+            print(f"Warning: Found {empty_file_count} empty files out of {len(df)} total records")
+
+        if missing_true_k_score_count > 0:
+            print(f"Warning: Found {missing_true_k_score_count} records with missing true_k score values")
+
+        # Count empty files and missing true_k scores for reporting
+        empty_file_count = sum(1 for result in all_results if result.get('empty_file', False))
+        missing_true_k_count = sum(1 for result in all_results if result.get('missing_true_k_score', False))
+
+        if empty_file_count > 0:
+            print(f"Warning: Found {empty_file_count} empty files out of {len(all_results)} total files")
+
+        if missing_true_k_count > 0:
+            print(f"Warning: Found {missing_true_k_count} entries missing true_k score out of {len(all_results)} total files")
 
         # Base output filename without extension
         if len(source_dirs) == 1:

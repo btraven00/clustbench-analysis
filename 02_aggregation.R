@@ -9,10 +9,13 @@ library(patchwork)
 #' Compare execution times and scores between backends
 #'
 #' @description Creates diagonal scatter plots comparing execution times and scores
-#'              between pairs of backends
+#'              between pairs of backends. Data points are first aggregated by 
+#'              (dataset_generator + dataset_name) x method x metric, calculating
+#'              the mean execution time and score across all repetitions. This ensures
+#'              a fair comparison of the same workload across different backends.
 #'
 #' @param data A tibble with benchmark data containing at least: backend, method, 
-#'             dataset_name, execution_time_seconds, and score columns
+#'             dataset_name, dataset_generator, metric, execution_time_seconds, and score columns
 #' @param backends Optional character vector of backends to compare (default: all backends in data)
 #'
 #' @return A patchwork object containing the comparison plots
@@ -32,6 +35,16 @@ compare_backend_plots <- function(data, backends = NULL) {
     stop("At least two backends are needed for comparison plots")
   }
   
+  # First aggregate the data by the canonical key (dataset_generator + dataset_name x method x metric) and backend
+  # This averages execution times and scores across all repetitions for each unique combination
+  aggregated_data <- data %>%
+    dplyr::group_by(backend, dataset_generator, dataset_name, method, metric) %>%
+    dplyr::summarize(
+      avg_execution_time = mean(execution_time_seconds, na.rm = TRUE),
+      avg_score = mean(score, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
   # Generate all pairs of backends
   backend_pairs <- expand.grid(backend1 = backends, backend2 = backends, stringsAsFactors = FALSE) %>%
     dplyr::filter(backend1 < backend2)  # Only keep unique pairs
@@ -41,16 +54,16 @@ compare_backend_plots <- function(data, backends = NULL) {
     b1 <- backend_pairs$backend1[i]
     b2 <- backend_pairs$backend2[i]
     
-    # Filter data for the two backends and join them
-    times_b1 <- data %>% 
+    # Filter aggregated data for the two backends
+    times_b1 <- aggregated_data %>% 
       dplyr::filter(backend == b1) %>%
-      dplyr::select(method, dataset_name, dataset_generator, metric, time_b1 = execution_time_seconds)
+      dplyr::select(method, dataset_name, dataset_generator, metric, time_b1 = avg_execution_time)
     
-    times_b2 <- data %>% 
+    times_b2 <- aggregated_data %>% 
       dplyr::filter(backend == b2) %>%
-      dplyr::select(method, dataset_name, dataset_generator, metric, time_b2 = execution_time_seconds)
+      dplyr::select(method, dataset_name, dataset_generator, metric, time_b2 = avg_execution_time)
     
-    # Join the two datasets
+    # Join the two datasets on the canonical key
     times_compare <- times_b1 %>%
       dplyr::inner_join(times_b2, by = c("method", "dataset_name", "dataset_generator", "metric"))
     
@@ -75,16 +88,16 @@ compare_backend_plots <- function(data, backends = NULL) {
     b1 <- backend_pairs$backend1[i]
     b2 <- backend_pairs$backend2[i]
     
-    # Filter data for the two backends and join them
-    scores_b1 <- data %>% 
+    # Filter aggregated data for the two backends
+    scores_b1 <- aggregated_data %>% 
       dplyr::filter(backend == b1) %>%
-      dplyr::select(method, dataset_name, dataset_generator, metric, score_b1 = score)
+      dplyr::select(method, dataset_name, dataset_generator, metric, score_b1 = avg_score)
     
-    scores_b2 <- data %>% 
+    scores_b2 <- aggregated_data %>% 
       dplyr::filter(backend == b2) %>%
-      dplyr::select(method, dataset_name, dataset_generator, metric, score_b2 = score)
+      dplyr::select(method, dataset_name, dataset_generator, metric, score_b2 = avg_score)
     
-    # Join the two datasets
+    # Join the two datasets on the canonical key
     scores_compare <- scores_b1 %>%
       dplyr::inner_join(scores_b2, by = c("method", "dataset_name", "dataset_generator", "metric"))
     

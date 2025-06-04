@@ -58,6 +58,7 @@ in
   pythonEnv = pkgs.python312.withPackages (ps: with ps; [
     pandas
     numpy
+    fastparquet
   ]);
   
   # Create .Rprofile content with explicit library paths
