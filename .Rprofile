@@ -1,6 +1,12 @@
 # .Rprofile created by Nix
 message("Loading Nix R environment...")
 
+# Ensure temp directories exist and are writable
+if (Sys.getenv("R_LIBS_USER") == "") {
+  Sys.setenv(R_LIBS_USER = file.path(tempdir(), "R_libs_user"))
+  dir.create(Sys.getenv("R_LIBS_USER"), showWarnings = FALSE, recursive = TRUE)
+}
+
 # Set library paths explicitly
 .libPaths(c(
   "/nix/store/g54xzq4v78jcyb3sqwg9w9yzz0fki6h0-r-knitr-1.49/library",
@@ -18,6 +24,26 @@ message("Loading Nix R environment...")
   "/nix/store/dwzpiw39yp977fng88p89kkfld0d7l73-r-testthat-3.2.3/library",
   .libPaths()
 ))
+
+# Show temp directory info
+message("R temp directory: ", tempdir())
+message("R user library: ", Sys.getenv("R_LIBS_USER"))
+
+# Check if temp directory is writable
+temp_writable <- tryCatch({
+  test_file <- file.path(tempdir(), "test_write.tmp")
+  writeLines("test", test_file)
+  file.exists(test_file)
+}, error = function(e) {
+  message("Warning: Temp directory not writable: ", e$message)
+  FALSE
+})
+
+if (temp_writable) {
+  message("✓ R temp directory is writable")
+} else {
+  message("✗ R temp directory is NOT writable")
+}
 
 # Custom function to check installed packages - using try() to handle potential issues
 list_nix_packages <- function() {
