@@ -1,7 +1,7 @@
 # shell.nix
 { pkgs ? import (fetchTarball {
-    url = "https://github.com/NixOS/nixpkgs/archive/nixos-24.05.tar.gz";
-    sha256 = "0zydsqiaz8qi4zd63zsb2gij2p614cgkcaisnk11wjy3nmiq0x1s";
+    url = "https://github.com/NixOS/nixpkgs/archive/refs/tags/25.11-pre.tar.gz";
+    sha256 = "1r4fhp3apf1qggsrm60ni820gxzpm04q9xdk1w3dap9qymi6bpdk";
   }) {} }:
 
 let
@@ -28,6 +28,7 @@ in pkgs.mkShell {
   buildInputs = [
     pkgs.R
     pkgs.rstudio
+    pkgs.texlive.combined.scheme-full  # Full TeX Live distribution
     rEnv
     rstudioWrapper
     pythonEnv
@@ -40,6 +41,7 @@ in pkgs.mkShell {
     # Add information about the environment
     echo "=== R Environment Setup ==="
     echo "Custom .Rprofile has been created"
+    echo "LaTeX installation available via texlive"
     echo ""
     echo "To start RStudio, run:"
     echo "  rstudio-wrapper"

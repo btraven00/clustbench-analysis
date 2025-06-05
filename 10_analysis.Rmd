@@ -3,6 +3,8 @@ title: "ClustBench Analysis"
 author: "omnibenchmark core team"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output:
+  pdf_document:
+    toc: true
   html_document:
     toc: true
     toc_float: true
@@ -10,8 +12,6 @@ output:
     highlight: tango
     code_folding: show
     df_print: paged
-  pdf_document:
-    toc: true
 ---
 
 ```{r setup, include=FALSE}
