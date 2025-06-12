@@ -2,12 +2,11 @@
 
 ## Overview
 
-This repo provides quick scripts for analyzing the results of clustering algorithm benchmarks produced by the ClustBench omni benchmark. It includes:
+This repo contains quick scripts for analyzing the results of clustering algorithm benchmarks produced by the ClustBench omnibenchmark. It includes:
 
 - Python script for aggregating scores from multiple runs
 - R functions for loading and processing benchmark data
-- R Markdown templates for detailed analysis and visualization
-- Debugging utilities for troubleshooting R/Nix integration
+- R Markdown reports for exploratory analysis and visualization
 
 ## Getting Started
 
@@ -38,7 +37,7 @@ install.packages(c("tidyverse", "arrow", "patchwork", "knitr",
                   "shiny", "scales", "testthat"))
 ```
 
-#### Option 2: Using Nix Shell (Recommended)
+#### Option 2: Using Nix Shell
 
 A `shell.nix` file is provided to create a reproducible environment with all dependencies:
 
