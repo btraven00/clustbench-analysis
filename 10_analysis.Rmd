@@ -5,6 +5,9 @@ date: "`r format(Sys.time(), '%d %B, %Y')`"
 output:
   pdf_document:
     toc: true
+    fig_width: 7
+    fig_height: 5
+    fig_crop: false
   html_document:
     toc: true
     toc_float: true
@@ -19,9 +22,10 @@ knitr::opts_chunk$set(
   echo = TRUE,           # Show code chunks in output
   warning = FALSE,       # Don't show warnings
   message = FALSE,       # Don't show messages
-  fig.width = 10,        # Default figure width
-  fig.height = 6,        # Default figure height
-  fig.align = "center"   # Center figures
+  fig.width = 7,         # Default figure width
+  fig.height = 5,        # Default figure height
+  fig.align = "center",  # Center figures
+  out.width = "100%"     # Make figures use full page width
 )
 
 # Load required libraries
