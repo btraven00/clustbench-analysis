@@ -38,7 +38,7 @@ def process_dir(base_dir, debug_mode):
 def process_run(base_dir, debug_mode=False):
     """
     Process a run directory containing clustbench results.
-    
+
     This function handles both individual run directories (out_BACKEND-TIMESTAMP)
     and parent directories containing multiple run directories.
     """
@@ -189,11 +189,23 @@ def extract_dataset_info(path):
     return extract_dataset_info(parent_dir)
 
 def extract_method_info(path):
-    """Extract method name from path or parameters.json"""
-    # Try to get from directory name
-    dir_match = re.search(r'method-(\w+)', path)
+    """Extract method name and seed from path or parameters.json"""
+    # Dictionary to return both method and seed
+    result = {'method': '', 'seed': None}
+
+    # Match any method format with a seed
+    # This will handle patterns like: method-FCPS_Clara_seed-172
+    seed_match = re.search(r'method-(.+?)_seed-(\d+)', path)
+    if seed_match:
+        result['method'] = seed_match.group(1)
+        result['seed'] = int(seed_match.group(2))
+        return result
+
+    # Try to get method name without seed
+    dir_match = re.search(r'method-([^/]+)', path)
     if dir_match:
-        return dir_match.group(1)
+        result['method'] = dir_match.group(1)
+        return result
 
     # Find the method directory
     current_dir = os.path.dirname(path)
@@ -210,20 +222,34 @@ def extract_method_info(path):
                     params = json.load(f)
                     method = params.get('method', '')
                     if method:
-                        return method
+                        result['method'] = method
+                        if 'seed' in params:
+                            result['seed'] = params['seed']
+                        return result
                 except:
                     pass
 
-        # Look for method in directory name
-        if os.path.basename(current_dir).startswith('method-'):
-            return os.path.basename(current_dir).split('-')[1]
+        # Look for method in directory name with possible seed
+        base_dir = os.path.basename(current_dir)
+
+        # Check for method-name_seed-123 pattern
+        seed_match = re.search(r'method-(.+?)_seed-(\d+)', base_dir)
+        if seed_match:
+            result['method'] = seed_match.group(1)
+            result['seed'] = int(seed_match.group(2))
+            return result
+
+        # Just a regular method without seed
+        if base_dir.startswith('method-'):
+            result['method'] = base_dir.split('-', 1)[1]
+            return result
 
         # Check for clustering library and linkage method pattern
-        base_dir = os.path.basename(current_dir)
         if base_dir.startswith('linkage-'):
             parent_dir = os.path.basename(os.path.dirname(current_dir))
             if parent_dir in ['agglomerative', 'fastcluster', 'sklearn']:
-                return f"{parent_dir}_{base_dir}"
+                result['method'] = f"{parent_dir}_{base_dir}"
+                return result
 
         # Move up one directory
         current_dir = os.path.dirname(current_dir)
@@ -231,13 +257,24 @@ def extract_method_info(path):
     # If we still don't have a method, check the path components directly
     path_parts = path.split(os.sep)
     for i, part in enumerate(path_parts):
-        if part.startswith('method-'):
-            return part.split('-')[1]
+        # Check for method-name_seed-123 pattern
+        seed_match = re.search(r'method-(.+?)_seed-(\d+)', part)
+        if seed_match:
+            result['method'] = seed_match.group(1)
+            result['seed'] = int(seed_match.group(2))
+            return result
+
+        # Regular method without seed
+        elif part.startswith('method-'):
+            result['method'] = part.split('-', 1)[1]
+            return result
+
         if part.startswith('linkage-') and i > 0:
             if path_parts[i-1] in ['agglomerative', 'fastcluster', 'sklearn']:
-                return f"{path_parts[i-1]}_{part}"
+                result['method'] = f"{path_parts[i-1]}_{part}"
+                return result
 
-    return ''  # Return empty string if method can't be found
+    return result  # Return dict with empty method and None seed if not found
 
 def extract_metric_info(path):
     """Extract metric name from path or parameters.json"""
@@ -252,11 +289,19 @@ def extract_metric_info(path):
         with open(params_file, 'r') as f:
             try:
                 params = json.load(f)
-                return params.get('metric', '')
+                metric = params.get('metric', '')
+                if metric:
+                    return metric
             except:
                 pass
 
-    return ''
+    # If we still don't have a metric, check the path components directly
+    path_parts = path.split(os.sep)
+    for part in path_parts:
+        if part.startswith('metric-'):
+            return part.split('-', 1)[1]
+
+    return ''  # Return empty string if metric can't be found
 
 def find_method_performance(file_path):
     """Find and extract execution time (seconds) from method's clustbench_performance.txt"""
@@ -394,7 +439,9 @@ def process_scores_file(file_path):
     try:
         # Extract information from the path
         dataset_gen, dataset_name = extract_dataset_info(file_path)
-        method = extract_method_info(file_path)
+        method_info = extract_method_info(file_path)
+        method = method_info['method']
+        seed = method_info['seed']
         metric = extract_metric_info(file_path)
 
         # Extract performance time (seconds) from the method directory
@@ -450,6 +497,7 @@ def process_scores_file(file_path):
                     'dataset_generator': dataset_gen,
                     'dataset_name': dataset_name,
                     'method': method,
+                    'seed': seed,  # Will be None if no seed was found
                     'metric': metric,
                     'execution_time_seconds': execution_time,
                     'duplicate_k_anomaly': False,
@@ -491,6 +539,7 @@ def process_scores_file(file_path):
                 'dataset_generator': dataset_gen,
                 'dataset_name': dataset_name,
                 'method': method,
+                'seed': seed,  # Will be None if no seed was found
                 'metric': metric,
                 'execution_time_seconds': execution_time,
                 'duplicate_k_anomaly': duplicate_k_anomaly,
@@ -663,7 +712,7 @@ def main():
 
         # Organize columns - metadata first, then k values
         all_columns = df.columns.tolist()
-        meta_columns = ['source_dir', 'backend', 'run_timestamp', 'dataset_generator', 'dataset_name', 'true_k', 'has_noise', 'method', 'metric', 'score', 'execution_time_seconds', 'duplicate_k_anomaly', 'empty_file', 'missing_true_k_score']
+        meta_columns = ['source_dir', 'backend', 'run_timestamp', 'dataset_generator', 'dataset_name', 'true_k', 'has_noise', 'method', 'seed', 'metric', 'score', 'execution_time_seconds', 'duplicate_k_anomaly', 'empty_file', 'missing_true_k_score']
         k_columns = [col for col in all_columns if col not in meta_columns]
 
         # Sort k columns numerically if they follow 'k=X' pattern
