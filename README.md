@@ -88,9 +88,7 @@ This method ensures that all dependencies are available to RStudio automatically
    - `analysis_template.Rmd` - For comprehensive analysis
    - `dashboard_template.Rmd` - For interactive exploration
 
-3. Knit the R Markdown file to generate the report or dashboard:
-   - Click the "Knit" button in RStudio, or
-   - Use the `rmarkdown::render()` function in R
+3. Knit the R Markdown file to generate the report or dashboard.
 
 ## File Structure
 

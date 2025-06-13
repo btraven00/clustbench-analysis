@@ -72,6 +72,18 @@ cat("Unique backends:", nlevels(data$backend), "\n")
 cat("Unique dataset generators:", nlevels(data$dataset_generator), "\n")
 cat("Unique dataset names:", nlevels(data$dataset_name), "\n")
 cat("Unique methods:", nlevels(data$method), "\n")
+# Check if seed column exists and has values
+if("seed" %in% colnames(data)) {
+  # Convert to numeric if it's a factor
+  if(is.factor(data$seed)) {
+    seed_values <- as.numeric(as.character(data$seed[!is.na(data$seed)]))
+  } else {
+    seed_values <- data$seed[!is.na(data$seed)]
+  }
+  if(length(seed_values) > 0) {
+    cat("Unique seeds:", length(unique(seed_values)), "\n")
+  }
+}
 cat("Unique metrics:", nlevels(data$metric), "\n")
 cat("Unique runs:", nlevels(data$run_timestamp), "\n")
 
@@ -284,7 +296,7 @@ data %>%
   select(backend, dataset_generator, dataset_name, method, metric,
          execution_time_seconds, time_z_score, score) %>%
   arrange(desc(abs(time_z_score))) %>%
-  head(10) %>%
+  head(12) %>%
   kable(caption = "Potential Performance Anomalies") %>%
   kable_styling()
 
@@ -298,7 +310,7 @@ data %>%
   select(backend, dataset_generator, dataset_name, method, metric,
          score, score_z_score, execution_time_seconds) %>%
   arrange(desc(abs(score_z_score))) %>%
-  head(10) %>%
+  head(12) %>%
   kable(caption = "Potential Score Anomalies") %>%
   kable_styling()
 ```
@@ -340,7 +352,379 @@ consistency_metrics %>%
 
 This analysis examines the consistency of scores across multiple repetitions of the same dataset, method, and metric combination. A score range of 0 indicates perfect consistency (all repetitions produced identical scores), while larger values suggest variability in the algorithm's output.
 
-TODO: filter NAs.
+# Seed Variability Analysis
+
+```{r check_for_seeds}
+# Ensure has_seed_data function exists (backward compatibility)
+if(!exists("has_seed_data")) {
+  has_seed_data <- function(data) {
+    return("seed" %in% colnames(data) &&
+           sum(!is.na(data$seed)) > 0)
+  }
+}
+
+# Check if seeds are present in the data
+has_seeds <- has_seed_data(data)
+if(has_seeds) {
+  cat("Seed data found in the dataset. Analyzing variability across seeds.\n")
+  # Count how many methods have seed values
+  methods_with_seeds <- data %>%
+    filter(!is.na(seed)) %>%
+    distinct(method) %>%
+    nrow()
+  cat("Number of methods with seed data:", methods_with_seeds, "\n")
+} else {
+  cat("No seed data found in the dataset. Skipping seed variability analysis.\n")
+}
+```
+
+```{r seed_variability_metrics, eval=exists("has_seeds") && has_seeds}
+# Analyze seed variability for methods
+# Define analyze_seed_variability if it doesn't exist (for backward compatibility)
+if(!exists("analyze_seed_variability") && has_seeds) {
+  analyze_seed_variability <- function(data) {
+    # Simple implementation if the function is missing
+    return(data %>%
+      dplyr::filter(!is.na(seed)) %>%
+      dplyr::group_by(dataset_generator, dataset_name, method, metric, backend) %>%
+      dplyr::summarize(
+        n_seeds = dplyr::n_distinct(seed),
+        mean_score = mean(score, na.rm = TRUE),
+        min_score = min(score, na.rm = TRUE),
+        max_score = max(score, na.rm = TRUE),
+        score_range = max_score - min_score,
+        score_sd = sd(score, na.rm = TRUE),
+        coefficient_of_variation = score_sd / abs(mean_score + 1e-10),
+        .groups = "drop"
+      ) %>%
+      dplyr::filter(n_seeds > 1) %>%
+      dplyr::arrange(desc(coefficient_of_variation)))
+  }
+}
+
+if(has_seeds) {
+  seed_variability <- analyze_seed_variability(data)
+
+  # Display top methods with highest variability across seeds
+  seed_variability %>%
+    select(method, dataset_name, metric, backend, n_seeds, mean_score, score_sd, coefficient_of_variation) %>%
+    arrange(desc(coefficient_of_variation)) %>%
+    head(12) %>%
+    kable(caption = "Top 12 Method-Dataset Combinations with Highest Seed Variability") %>%
+    kable_styling()
+}
+```
+
+```{r method_seed_variability_plot, eval=exists("has_seeds") && has_seeds, fig.width=10, fig.height=7}
+# Check if plot_method_seed_variability exists (backward compatibility)
+if(!exists("plot_method_seed_variability") && has_seeds) {
+  # Define a simple version if missing
+  plot_method_seed_variability <- function(data, metric_filter=NULL, dataset_filter=NULL, method_filter=NULL, top_n=NULL) {
+    # Filter data
+    filtered_data <- data %>% dplyr::filter(!is.na(seed))
+
+    if(!is.null(metric_filter)) {
+      filtered_data <- filtered_data %>% dplyr::filter(metric == metric_filter)
+    }
+
+    if(!is.null(dataset_filter)) {
+      filtered_data <- filtered_data %>% dplyr::filter(dataset_name == dataset_filter)
+    }
+
+    # Calculate stats by method and seed
+    method_stats <- filtered_data %>%
+      dplyr::group_by(method, backend) %>%
+      dplyr::summarize(
+        mean_score = mean(score, na.rm = TRUE),
+        sd_score = sd(score, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+    # Create the plot
+    return(ggplot(method_stats, aes(x = method, y = mean_score, fill = backend)) +
+      geom_bar(stat = "identity", position = position_dodge(width = 0.9), alpha = 0.7) +
+      geom_errorbar(
+        aes(ymin = mean_score - sd_score, ymax = mean_score + sd_score),
+        position = position_dodge(width = 0.9),
+        width = 0.25
+      ) +
+      labs(
+        title = "Method Performance with Seed Variability",
+        x = "Method",
+        y = "Average Score"
+      ) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top"
+      ))
+  }
+}
+
+# Plot method performance with seed variability error bars
+if(has_seeds) {
+  # Use the first metric for initial analysis
+  first_metric <- levels(data$metric)[1]
+
+  # Create plot for all datasets with first metric
+  method_seed_plot <- plot_method_seed_variability(data,
+                                                  metric_filter = first_metric)
+  print(method_seed_plot)
+
+  # If there are multiple metrics, try another one
+  if(length(levels(data$metric)) > 1) {
+    second_metric <- levels(data$metric)[2]
+    method_seed_plot2 <- plot_method_seed_variability(data,
+                                                     metric_filter = second_metric)
+    print(method_seed_plot2)
+  }
+}
+```
+
+```{r seed_sensitivity_heatmap, eval=exists("has_seeds") && has_seeds, fig.width=10, fig.height=8}
+# Check if plot_seed_sensitivity_heatmap exists (for backward compatibility)
+if(!exists("plot_seed_sensitivity_heatmap") && has_seeds) {
+  # Define a simple version if missing
+  plot_seed_sensitivity_heatmap <- function(data, metric_filter=NULL, max_methods=NULL, max_datasets=NULL) {
+    # First compute seed CV
+    compute_seed_cv <- function(data) {
+      return(data %>%
+        dplyr::filter(!is.na(seed)) %>%
+        dplyr::group_by(dataset_generator, dataset_name, method, metric, backend) %>%
+        dplyr::summarize(
+          n_seeds = dplyr::n_distinct(seed),
+          mean_score = mean(score, na.rm = TRUE),
+          sd_score = sd(score, na.rm = TRUE),
+          cv = sd_score / abs(mean_score + 1e-10),
+          .groups = "drop"
+        ) %>%
+        dplyr::filter(n_seeds > 1))
+    }
+
+    # Filter data
+    filtered_data <- data %>% dplyr::filter(!is.na(seed))
+
+    if(!is.null(metric_filter)) {
+      filtered_data <- filtered_data %>% dplyr::filter(metric == metric_filter)
+    }
+
+    # Calculate CV
+    cv_data <- compute_seed_cv(filtered_data)
+
+    if(nrow(cv_data) == 0) {
+      return(ggplot() +
+               annotate("text", x = 0.5, y = 0.5, label = "No valid data for heatmap") +
+               theme_void())
+    }
+
+    # Create the heatmap
+    return(ggplot(cv_data, aes(x = method, y = dataset_name, fill = cv)) +
+      geom_tile() +
+      scale_fill_viridis_c(name = "Coefficient of\nVariation (CV)") +
+      labs(
+        title = "Seed Sensitivity Heatmap",
+        x = "Method",
+        y = "Dataset"
+      ) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right"
+      ))
+  }
+}
+
+# Create heatmap of seed sensitivity
+if(has_seeds) {
+  # Create heatmap for first metric
+  first_metric <- levels(data$metric)[1]
+  sensitivity_heatmap <- plot_seed_sensitivity_heatmap(data,
+                                                      metric_filter = first_metric,
+                                                      max_methods = 15,  # Limit to most variable methods
+                                                      max_datasets = 10) # Limit to most variable datasets
+  print(sensitivity_heatmap)
+
+  # If there are multiple metrics, try another one
+  if(length(levels(data$metric)) > 1) {
+    second_metric <- levels(data$metric)[2]
+    sensitivity_heatmap2 <- plot_seed_sensitivity_heatmap(data,
+                                                         metric_filter = second_metric,
+                                                         max_methods = 15,
+                                                         max_datasets = 10)
+    print(sensitivity_heatmap2)
+  }
+}
+```
+
+The coefficient of variation measures the sensitivity of the method-metric-dataset combination to changes in random seed initialization.
+
+## Dataset-Specific Seed Sensitivity
+
+```{r dataset_specific_analysis, eval=exists("has_seeds") && has_seeds, fig.width=10, fig.height=6}
+# Analyze seed sensitivity for specific datasets
+if(has_seeds) {
+  # Get unique datasets
+  unique_datasets <- unique(data$dataset_name)
+
+  # Choose up to 3 datasets for focused analysis
+  datasets_to_analyze <- head(unique_datasets, 3)
+
+  for(ds in datasets_to_analyze) {
+    cat("\n### Dataset:", ds, "\n")
+
+    # Filter data for this dataset
+    ds_data <- data %>% filter(dataset_name == ds, !is.na(seed))
+
+    # Count seeds per method for this dataset
+    seed_counts <- ds_data %>%
+      group_by(method) %>%
+      summarize(unique_seeds = n_distinct(seed),
+                .groups = "drop") %>%
+      arrange(desc(unique_seeds))
+
+    # Display methods with most seeds
+    print(seed_counts %>%
+            head(5) %>%
+            kable(caption = paste("Number of unique seeds per method for", ds)) %>%
+            kable_styling())
+
+    # Calculate variability metrics for this dataset
+    ds_variability <- ds_data %>%
+      group_by(method, metric, backend) %>%
+      summarize(
+        n_seeds = n_distinct(seed),
+        mean_score = mean(score, na.rm = TRUE),
+        sd_score = sd(score, na.rm = TRUE),
+        cv = sd_score / abs(mean_score + 1e-10),  # Add small constant to avoid division by zero
+        .groups = "drop"
+      ) %>%
+      filter(n_seeds > 1) %>%
+      arrange(desc(cv))
+
+    # Create plot for this dataset using the first metric
+    first_metric <- levels(ds_data$metric)[1]
+    if(!is.null(first_metric)) {
+      ds_plot <- plot_method_seed_variability(
+        data,
+        dataset_filter = ds,
+        metric_filter = first_metric
+      )
+      print(ds_plot)
+    }
+
+    # Box plot showing distribution of scores across seeds for top methods
+    top_methods <- head(ds_variability$method, 5)
+
+    if(length(top_methods) > 0) {
+      box_plot <- ds_data %>%
+        filter(method %in% top_methods, metric == first_metric) %>%
+        ggplot(aes(x = method, y = score, fill = method)) +
+        geom_boxplot() +
+        labs(
+          title = paste("Distribution of Scores Across Seeds for", ds),
+          subtitle = paste("Metric:", first_metric),
+          x = "Method",
+          y = "Score"
+        ) +
+        theme_minimal() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+      print(box_plot)
+    }
+  }
+}
+```
+
+This dataset-specific analysis reveals how the same method can show different levels of sensitivity to random seeds depending on the dataset characteristics. Some methods may be highly stable across seeds for one dataset but show significant variability for another, highlighting the interaction between dataset properties and algorithm stochasticity.
+
+## Metric-Specific Seed Sensitivity
+
+```{r metric_comparison, eval=exists("has_seeds") && has_seeds, fig.width=10, fig.height=8}
+# Compare seed sensitivity across different metrics
+if(has_seeds) {
+  # Get unique metrics
+  unique_metrics <- levels(data$metric)
+
+  if(length(unique_metrics) > 1) {
+    # Calculate CV for each method-metric combination
+    metric_cv_data <- data %>%
+      filter(!is.na(seed)) %>%
+      group_by(method, metric, backend) %>%
+      summarize(
+        n_seeds = n_distinct(seed),
+        mean_score = mean(score, na.rm = TRUE),
+        sd_score = sd(score, na.rm = TRUE),
+        cv = sd_score / abs(mean_score + 1e-10),
+        .groups = "drop"
+      ) %>%
+      filter(n_seeds > 1)
+
+    # Find methods with data for multiple metrics
+    methods_with_multiple_metrics <- metric_cv_data %>%
+      group_by(method) %>%
+      filter(n_distinct(metric) > 1) %>%
+      ungroup() %>%
+      distinct(method) %>%
+      pull(method)
+
+    if(length(methods_with_multiple_metrics) > 0) {
+      # Filter for these methods
+      multi_metric_data <- metric_cv_data %>%
+        filter(method %in% methods_with_multiple_metrics)
+
+      # Create comparison plot
+      metric_comparison_plot <- ggplot(multi_metric_data,
+                             aes(x = method, y = cv, fill = metric)) +
+        geom_bar(stat = "identity", position = "dodge") +
+        labs(
+          title = "Comparison of Seed Sensitivity Across Metrics",
+          subtitle = "Higher coefficient of variation (CV) indicates greater sensitivity to random seeds",
+          x = "Method",
+          y = "Coefficient of Variation (CV)"
+        ) +
+        theme_minimal() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+      print(metric_comparison_plot)
+
+      # Create heatmap for comparing metrics
+      metric_heatmap <- multi_metric_data %>%
+        ggplot(aes(x = method, y = metric, fill = cv)) +
+        geom_tile() +
+        scale_fill_viridis_c(name = "CV") +
+        labs(
+          title = "Heatmap of Seed Sensitivity by Method and Metric",
+          x = "Method",
+          y = "Metric"
+        ) +
+        theme_minimal() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+      print(metric_heatmap)
+
+      # Summarize which metrics are most affected by seeds
+      metric_summary <- multi_metric_data %>%
+        group_by(metric) %>%
+        summarize(
+          avg_cv = mean(cv, na.rm = TRUE),
+          max_cv = max(cv, na.rm = TRUE),
+          n_methods = n(),
+          .groups = "drop"
+        ) %>%
+        arrange(desc(avg_cv))
+
+      print(metric_summary %>%
+              kable(caption = "Metrics Ranked by Average Seed Sensitivity") %>%
+              kable_styling())
+    } else {
+      cat("No methods have data for multiple metrics with seed variation.\n")
+    }
+  } else {
+    cat("Only one metric available. Cannot compare seed sensitivity across metrics.\n")
+  }
+}
+```
+
 
 # Conclusions
 
