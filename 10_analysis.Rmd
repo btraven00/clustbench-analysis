@@ -5,8 +5,8 @@ date: "`r format(Sys.time(), '%d %B, %Y')`"
 output:
   pdf_document:
     toc: true
-    fig_width: 7
-    fig_height: 5
+    fig_width: 8
+    fig_height: 6
     fig_crop: false
   html_document:
     toc: true
@@ -22,8 +22,8 @@ knitr::opts_chunk$set(
   echo = TRUE,           # Show code chunks in output
   warning = FALSE,       # Don't show warnings
   message = FALSE,       # Don't show messages
-  fig.width = 7,         # Default figure width
-  fig.height = 5,        # Default figure height
+  fig.width = 8,         # Default figure width
+  fig.height = 6,        # Default figure height
   fig.align = "center",  # Center figures
   out.width = "100%"     # Make figures use full page width
 )
@@ -47,698 +47,958 @@ source("02_aggregation.R")
 
 # Introduction
 
-This analysis examines clustering benchmark results from several ClustBench omnibenchmark runs.
+This analysis examines clustering benchmark results from ClustBench omnibenchmark runs using the new denormalized data structure. The analysis is now based on two separate datasets:
 
-For now, I'm examining only a partial run of the benchmark, for a few selected backends and just the FCPS methods (that had proven problematic before)
+- **Method Performance**: Execution metrics at the dataset × method × seed level
+- **Metric Performance**: Clustering quality scores at the dataset × method × seed × metric level
+
+This separation allows for more efficient analysis without the need to aggregate method-level data from metric-centric tables.
 
 ## Load and Prepare Data
 
 ```{r load_data}
-# Find the most recent parquet file if not specified
-data_file <- find_parquet_file(".")
+# Load both method and metric performance data
+data <- load_performance_data(".")
 
-# Load the data
-data <- load_from_parquet(data_file)
+# Extract the two datasets
+method_data <- data$method
+metric_data <- data$metric
 
-# Show the data structure
-glimpse(data)
+# Show the structure of both datasets
+cat("Method Performance Data Structure:\n")
+glimpse(method_data)
+
+cat("\nMetric Performance Data Structure:\n")
+glimpse(metric_data)
 ```
 
 ## Data Overview
 
 ```{r data_summary}
-# Count number of unique values in categorical columns
-cat("Unique backends:", nlevels(data$backend), "\n")
-cat("Unique dataset generators:", nlevels(data$dataset_generator), "\n")
-cat("Unique dataset names:", nlevels(data$dataset_name), "\n")
-cat("Unique methods:", nlevels(data$method), "\n")
-# Check if seed column exists and has values
-if("seed" %in% colnames(data)) {
-  # Convert to numeric if it's a factor
-  if(is.factor(data$seed)) {
-    seed_values <- as.numeric(as.character(data$seed[!is.na(data$seed)]))
-  } else {
-    seed_values <- data$seed[!is.na(data$seed)]
-  }
-  if(length(seed_values) > 0) {
-    cat("Unique seeds:", length(unique(seed_values)), "\n")
-  }
-}
-cat("Unique metrics:", nlevels(data$metric), "\n")
-cat("Unique runs:", nlevels(data$run_timestamp), "\n")
+# Method data summary
+cat("=== METHOD PERFORMANCE DATA ===\n")
+cat("Total method runs:", nrow(method_data), "\n")
+cat("Unique backends:", nlevels(method_data$backend), "\n")
+cat("Unique dataset generators:", nlevels(method_data$dataset_generator), "\n")
+cat("Unique dataset names:", nlevels(method_data$dataset_name), "\n")
+cat("Unique methods:", nlevels(method_data$method), "\n")
 
-# Display summary statistics
-data %>%
+# Check if seed data exists in method data
+if (has_seed_data(method_data)) {
+  seed_values <- method_data$seed[!is.na(method_data$seed)]
+  cat("Unique seeds:", length(unique(seed_values)), "\n")
+} else {
+  cat("No seed data available\n")
+}
+
+cat("Unique run timestamps:", nlevels(method_data$run_timestamp), "\n")
+
+# Metric data summary
+cat("\n=== METRIC PERFORMANCE DATA ===\n")
+cat("Total metric evaluations:", nrow(metric_data), "\n")
+cat("Unique metrics:", nlevels(metric_data$metric), "\n")
+
+# Summary statistics by backend for method data
+cat("\n=== METHOD PERFORMANCE BY BACKEND ===\n")
+method_summary <- method_data %>%
   group_by(backend) %>%
   summarize(
     total_runs = n(),
     datasets = n_distinct(paste(dataset_generator, dataset_name)),
     methods = n_distinct(method),
+    avg_execution_time = mean(execution_time_seconds, na.rm = TRUE),
+    med_execution_time = median(execution_time_seconds, na.rm = TRUE),
+    avg_runtime = mean(runtime, na.rm = TRUE),
+    med_runtime = median(runtime, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+kable(method_summary, digits = 2, caption = "Method Performance Summary by Backend") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+# Summary statistics by backend for metric data
+cat("\n=== METRIC PERFORMANCE BY BACKEND ===\n")
+metric_summary <- metric_data %>%
+  group_by(backend, metric) %>%
+  summarize(
+    total_evaluations = n(),
     avg_score = mean(score, na.rm = TRUE),
     med_score = median(score, na.rm = TRUE),
-    avg_time = mean(execution_time_seconds, na.rm = TRUE),
-    med_time = median(execution_time_seconds, na.rm = TRUE)
-  ) %>%
-  kable() %>%
-  kable_styling()
-```
-
-## Consistency of method runtime
-
-Do note that here we've collected the runtime (in seconds) for the method. So it's expected
-that each row has a repeated value for the same dataset x backend x run x method.
-
-```{r consistency-runtime}
-# Aggregate by dataset_generator, dataset_name, and method to check score consistency across runs
-consistency_check_runtime <- data %>%
-  mutate(dataset = paste(dataset_generator, dataset_name, sep = "/")) %>%
-  group_by(dataset, method, backend) %>%
-  summarize(
-    n_runs = n_distinct(run_timestamp),
-    n_runtime = n_distinct(execution_time_seconds),
-    min_score = min(execution_time_seconds, na.rm = TRUE),
-    max_score = max(execution_time_seconds, na.rm = TRUE),
-    score_range = max_score - min_score,
-    is_consistent = score_range < 1e-9,  # Using small epsilon for floating point comparison
-    .groups = "drop"
-  ) %>%
-  arrange(desc(score_range))
-
-
-```
-
-## Consistency of metric scores
-
-```{r consistency-metrics}
-# Aggregate by dataset_generator, dataset_name, and method to check score consistency across runs
-consistency_check_metrics <- data %>%
-  mutate(dataset = paste(dataset_generator, dataset_name, sep = "/")) %>%
-  group_by(dataset, method, backend, metric) %>%
-  summarize(
-    n_runs = n_distinct(run_timestamp),
     min_score = min(score, na.rm = TRUE),
     max_score = max(score, na.rm = TRUE),
-    score_range = max_score - min_score,
-    is_consistent = score_range < 1e-9,  # Using small epsilon for floating point comparison
     .groups = "drop"
   ) %>%
-  arrange(desc(score_range))
+  arrange(backend, metric)
 
+kable(metric_summary, digits = 3, caption = "Metric Performance Summary by Backend") %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  scroll_box(height = "400px")
 ```
 
+# Execution Time Analysis
 
-# Score Analysis
+## Backend Comparison - Execution Times
 
-## Distribution of Scores
+```{r execution_time_comparison, fig.width=10, fig.height=8}
+# Compare execution times between backends
+if (nlevels(method_data$backend) > 1) {
+  time_comparison <- compare_backend_execution_times(method_data)
+  print(time_comparison)
+} else {
+  cat("Only one backend available, skipping backend comparison plots")
+}
+```
 
-```{r score_distribution}
-# Plot distribution of scores for each backend
-data %>%
-  ggplot(aes(x = backend, y = score, fill = backend)) +
-  geom_boxplot() +
+## Execution Time Distribution
+
+```{r execution_time_distribution, fig.width=10, fig.height=6}
+# Distribution of execution times by backend
+p1 <- ggplot(method_data, aes(x = execution_time_seconds, fill = backend)) +
+  geom_histogram(alpha = 0.7, bins = 50) +
+  scale_x_log10() +
+  facet_wrap(~backend, scales = "free_y") +
   labs(
-    title = "Distribution of Scores Across Backends",
-    x = "Backend",
-    y = "Score"
+    title = "Distribution of Execution Times by Backend",
+    x = "Execution Time (seconds, log scale)",
+    y = "Count"
   ) +
   theme_minimal() +
   theme(legend.position = "none")
-```
 
-## Score by Method
+# Box plot by method
+top_methods <- method_data %>%
+  count(method, sort = TRUE) %>%
+  slice_head(n = 10) %>%
+  pull(method)
 
-```{r score_by_method}
-# Plot average score by method for each backend
-data %>%
-  group_by(backend, method) %>%
-  summarize(
-    avg_score = mean(score, na.rm = TRUE),
-    std_dev = sd(score, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  ggplot(aes(x = method, y = avg_score, fill = backend)) +
-  geom_col(position = "dodge") +
-  geom_errorbar(
-    aes(ymin = avg_score - std_dev, ymax = avg_score + std_dev),
-    position = position_dodge(0.9),
-    width = 0.25
-  ) +
+p2 <- method_data %>%
+  filter(method %in% top_methods) %>%
+  ggplot(aes(x = method, y = execution_time_seconds, fill = method)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_y_log10() +
   labs(
-    title = "Average Score by Method and Backend",
+    title = "Execution Time Distribution by Method (Top 10)",
     x = "Method",
-    y = "Average Score"
+    y = "Execution Time (seconds, log scale)"
   ) +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+
+print(p1 / p2)
 ```
 
-## Score by Dataset
+## Runtime Distribution Comparison
 
-```{r score_by_dataset}
-# Plot heatmap of scores by dataset and method
-data %>%
-  filter(metric == levels(data$metric)[1]) %>%  # Choose one metric for clarity
-  group_by(dataset_name, method) %>%
+```{r runtime_distribution, fig.width=12, fig.height=8}
+# Compare runtime distributions between backends
+# Runtime is available in both method_data and metric_data
+# We'll use metric_data since it has more granular runtime information per metric
+
+p_runtime_method <- method_data %>%
+  filter(!is.na(runtime)) %>%
+  ggplot(aes(x = runtime)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  facet_wrap(~ backend, scales = "free_y") +
+  labs(
+    title = "Runtime Distribution by Backend (Method Level)",
+    subtitle = "Runtime from method execution",
+    x = "Runtime (seconds)",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+p_runtime_metric <- metric_data %>%
+  filter(!is.na(runtime)) %>%
+  ggplot(aes(x = runtime)) +
+  geom_histogram(bins = 30, fill = "darkgreen", color = "white") +
+  facet_wrap(~ backend, scales = "free_y") +
+  labs(
+    title = "Runtime Distribution by Backend (Metric Level)",
+    subtitle = "Runtime from metric evaluation",
+    x = "Runtime (seconds)",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+print(p_runtime_method / p_runtime_metric)
+
+# Summary statistics for runtime by backend
+cat("=== RUNTIME SUMMARY STATISTICS ===\n")
+
+# Method-level runtime summary
+method_runtime_summary <- method_data %>%
+  filter(!is.na(runtime)) %>%
+  group_by(backend) %>%
   summarize(
-    avg_score = mean(score, na.rm = TRUE),
+    count = n(),
+    mean_runtime = mean(runtime, na.rm = TRUE),
+    median_runtime = median(runtime, na.rm = TRUE),
+    sd_runtime = sd(runtime, na.rm = TRUE),
+    min_runtime = min(runtime, na.rm = TRUE),
+    max_runtime = max(runtime, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("\nMethod-level runtime summary:\n")
+kable(method_runtime_summary, digits = 3, caption = "Method Runtime Statistics by Backend") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+# Metric-level runtime summary
+metric_runtime_summary <- metric_data %>%
+  filter(!is.na(runtime)) %>%
+  group_by(backend) %>%
+  summarize(
+    count = n(),
+    mean_runtime = mean(runtime, na.rm = TRUE),
+    median_runtime = median(runtime, na.rm = TRUE),
+    sd_runtime = sd(runtime, na.rm = TRUE),
+    min_runtime = min(runtime, na.rm = TRUE),
+    max_runtime = max(runtime, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("\nMetric-level runtime summary:\n")
+kable(metric_runtime_summary, digits = 3, caption = "Metric Runtime Statistics by Backend") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Memory Usage Analysis
+
+### Peak RSS Distribution
+
+```{r peak_rss_analysis, fig.width=14, fig.height=10}
+# Analyze peak RSS (Resident Set Size) memory usage
+# Create a 2D facet grid by dataset and method
+
+# First, let's see what data we have for peak_rss
+cat("Peak RSS Analysis:\n")
+cat("Total method runs with peak_rss data:", sum(!is.na(method_data$peak_rss)), "\n")
+cat("Peak RSS range:", min(method_data$peak_rss, na.rm = TRUE), "-",
+    max(method_data$peak_rss, na.rm = TRUE), "KB\n")
+
+# Get top datasets and methods for visualization (to keep the plot readable)
+top_datasets <- method_data %>%
+  count(dataset_generator, dataset_name, sort = TRUE) %>%
+  slice_head(n = 8) %>%
+  mutate(dataset = paste(dataset_generator, dataset_name, sep = "_"))
+
+top_methods <- method_data %>%
+  count(method, sort = TRUE) %>%
+  slice_head(n = 8) %>%
+  pull(method)
+
+# Filter data for visualization
+peak_rss_data <- method_data %>%
+  filter(!is.na(peak_rss)) %>%
+  semi_join(top_datasets, by = c("dataset_generator", "dataset_name")) %>%
+  filter(method %in% top_methods) %>%
+  mutate(
+    dataset = paste(dataset_generator, dataset_name, sep = "_"),
+    peak_rss_mb = peak_rss / 1024  # Convert to MB for better readability
+  )
+
+# Create the 2D facet grid plot
+p_peak_rss <- ggplot(peak_rss_data, aes(x = peak_rss_mb, fill = backend)) +
+  geom_histogram(bins = 20, alpha = 0.7) +
+  facet_grid(dataset ~ method, scales = "free") +
+  scale_x_log10() +
+  labs(
+    title = "Peak RSS Memory Usage Distribution",
+    subtitle = "2D facet grid: Dataset (rows) × Method (columns)",
+    x = "Peak RSS (MB, log scale)",
+    y = "Count",
+    fill = "Backend"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    axis.text.y = element_text(size = 8),
+    strip.text = element_text(size = 8),
+    legend.position = "bottom"
+  )
+
+print(p_peak_rss)
+
+# Summary statistics by dataset and method
+peak_rss_summary <- peak_rss_data %>%
+  group_by(dataset, method) %>%
+  summarize(
+    count = n(),
+    mean_rss_mb = mean(peak_rss_mb, na.rm = TRUE),
+    median_rss_mb = median(peak_rss_mb, na.rm = TRUE),
+    max_rss_mb = max(peak_rss_mb, na.rm = TRUE),
     .groups = "drop"
   ) %>%
-  ggplot(aes(x = method, y = dataset_name, fill = avg_score)) +
+  arrange(desc(mean_rss_mb))
+
+cat("\nTop 10 Dataset×Method combinations by mean peak RSS:\n")
+kable(head(peak_rss_summary, 10), digits = 1,
+      caption = "Peak RSS Summary by Dataset and Method") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+# Alternative view: Heatmap of mean peak RSS
+p_rss_heatmap <- peak_rss_data %>%
+  group_by(dataset, method) %>%
+  summarize(mean_rss_mb = mean(peak_rss_mb, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = method, y = dataset, fill = mean_rss_mb)) +
   geom_tile() +
-  scale_fill_viridis_c() +
+  scale_fill_viridis_c(name = "Mean Peak\nRSS (MB)", trans = "log10") +
   labs(
-    title = "Average Score by Dataset and Method",
+    title = "Mean Peak RSS Heatmap",
+    subtitle = "Dataset × Method combinations",
     x = "Method",
     y = "Dataset"
   ) +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 9)
+  )
+
+print(p_rss_heatmap)
 ```
 
-# Performance Analysis
+## Clustering Quality Analysis
 
-## Execution Time
+### Backend Comparison - Clustering Scores
 
-```{r execution_time}
-# Plot distribution of execution times
-data %>%
-  ggplot(aes(x = backend, y = execution_time_seconds, fill = backend)) +
-  geom_boxplot() +
+```{r score_comparison, fig.width=12, fig.height=10}
+# Compare clustering scores between backends
+if (nlevels(metric_data$backend) > 1) {
+  score_comparison <- compare_backend_scores(metric_data)
+  print(score_comparison)
+} else {
+  cat("Only one backend available, skipping backend score comparison plots")
+}
+```
+
+### Score Distribution by Metric
+
+```{r score_distribution, fig.width=12, fig.height=8}
+# Distribution of scores by metric
+p_scores <- ggplot(metric_data, aes(x = score, fill = metric)) +
+  geom_histogram(alpha = 0.7, bins = 30) +
+  facet_wrap(~metric, scales = "free") +
   labs(
-    title = "Distribution of Execution Times Across Backends",
-    x = "Backend",
-    y = "Execution Time (seconds)"
-  ) +
-  scale_y_log10() +
-  theme_minimal() +
-  theme(legend.position = "none")
-```
-
-## Execution Time by Method
-
-```{r time_by_method}
-# Plot average execution time by method for each backend
-data %>%
-  group_by(backend, method) %>%
-  summarize(
-    avg_time = mean(execution_time_seconds, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  ggplot(aes(x = method, y = avg_time, fill = backend)) +
-  geom_col(position = "dodge") +
-  labs(
-    title = "Average Execution Time by Method and Backend",
-    x = "Method",
-    y = "Average Time (seconds)"
-  ) +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-```
-
-# Runtime vs Score Tradeoff
-
-```{r performance_quality}
-# Plot score vs execution time
-data %>%
-  ggplot(aes(x = execution_time_seconds, y = score, color = backend, shape = method)) +
-  geom_point(alpha = 0.7) +
-  labs(
-    title = "Score vs. Execution Time",
-    x = "Execution Time (seconds)",
-    y = "Score"
-  ) +
-  theme_minimal() +
-  scale_x_log10() +  # Log scale for execution time
-  geom_smooth(aes(group = method), method = "loess", se = FALSE, linetype = "dashed")
-```
-
-# Backend Comparison Plots
-
-```{r backend_comparison}
-# Generate diagonal comparison plots for backends
-compare_plots <- compare_backend_plots(data)
-compare_plots
-```
-
-The diagonal line represents perfect agreement between backends. Points falling on this line indicate identical performance between backends, while deviations suggest differences in implementation or environment effects.
-
-# Anomaly Detection
-
-```{r anomalies}
-# Find outliers in performance (execution times)
-data %>%
-  group_by(method, dataset_name) %>%
-  mutate(
-    time_z_score = (execution_time_seconds - mean(execution_time_seconds)) /
-                  sd(execution_time_seconds)
-  ) %>%
-  filter(abs(time_z_score) > 2) %>%
-  select(backend, dataset_generator, dataset_name, method, metric,
-         execution_time_seconds, time_z_score, score) %>%
-  arrange(desc(abs(time_z_score))) %>%
-  head(12) %>%
-  kable(caption = "Potential Performance Anomalies") %>%
-  kable_styling()
-
-# Find outliers in scores
-data %>%
-  group_by(method, dataset_name) %>%
-  mutate(
-    score_z_score = (score - mean(score)) / sd(score)
-  ) %>%
-  filter(abs(score_z_score) > 2) %>%
-  select(backend, dataset_generator, dataset_name, method, metric,
-         score, score_z_score, execution_time_seconds) %>%
-  arrange(desc(abs(score_z_score))) %>%
-  head(12) %>%
-  kable(caption = "Potential Score Anomalies") %>%
-  kable_styling()
-```
-
-# Score Consistency Analysis
-
-```{r score_consistency}
-# Check if every repetition for each dataset x method x metric gets exactly the same score
-consistency_metrics <- check_score_consistency(data)
-
-# Display summary of consistency metrics
-consistency_metrics %>%
-  filter(n_repetitions > 1) %>%  # Only show combinations with multiple repetitions
-  arrange(desc(score_range)) %>%  # Sort by least consistent first
-  head(10) %>%
-  kable(caption = "Top 10 Score Inconsistencies Across Repetitions") %>%
-  kable_styling()
-
-# Summarize consistency by backend
-backend_consistency <- summarize_backend_consistency(data)
-
-# Display backend consistency summary
-backend_consistency %>%
-  kable(caption = "Backend Consistency Summary") %>%
-  kable_styling()
-
-# Visualize distribution of score ranges
-consistency_metrics %>%
-  filter(n_repetitions > 1, score_range > 0) %>%
-  ggplot(aes(x = score_range)) +
-  geom_histogram(bins = 30) +
-  labs(
-    title = "Distribution of Score Ranges Across Repetitions",
-    x = "Score Range (Max - Min)",
+    title = "Distribution of Clustering Scores by Metric",
+    x = "Score",
     y = "Count"
   ) +
-  theme_minimal()
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(p_scores)
 ```
 
-This analysis examines the consistency of scores across multiple repetitions of the same dataset, method, and metric combination. A score range of 0 indicates perfect consistency (all repetitions produced identical scores), while larger values suggest variability in the algorithm's output.
+### Top Performing Methods by Metric
 
-# Seed Variability Analysis
+```{r top_methods, fig.width=12, fig.height=10}
+# Calculate top methods for each metric
+top_methods_by_metric <- metric_data %>%
+  group_by(metric, method) %>%
+  summarize(
+    avg_score = mean(score, na.rm = TRUE),
+    n_runs = n(),
+    .groups = "drop"
+  ) %>%
+  filter(n_runs >= 5) %>%  # Only methods with at least 5 runs
+  group_by(metric) %>%
+  slice_max(avg_score, n = 10) %>%
+  ungroup()
 
-```{r check_for_seeds}
-# Ensure has_seed_data function exists (backward compatibility)
-if(!exists("has_seed_data")) {
-  has_seed_data <- function(data) {
-    return("seed" %in% colnames(data) &&
-           sum(!is.na(data$seed)) > 0)
-  }
-}
+# Plot top methods for each metric
+p_top <- ggplot(top_methods_by_metric, aes(x = reorder(method, avg_score), y = avg_score, fill = metric)) +
+  geom_col(alpha = 0.8) +
+  coord_flip() +
+  facet_wrap(~metric, scales = "free") +
+  labs(
+    title = "Top 10 Methods by Average Score (Each Metric)",
+    subtitle = "Only methods with >= 5 runs shown",
+    x = "Method",
+    y = "Average Score"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 10)
+  )
 
-# Check if seeds are present in the data
-has_seeds <- has_seed_data(data)
-if(has_seeds) {
-  cat("Seed data found in the dataset. Analyzing variability across seeds.\n")
-  # Count how many methods have seed values
-  methods_with_seeds <- data %>%
-    filter(!is.na(seed)) %>%
-    distinct(method) %>%
-    nrow()
-  cat("Number of methods with seed data:", methods_with_seeds, "\n")
+print(p_top)
+```
+
+## Data Quality Assessment
+
+### Score Consistency Analysis
+
+```{r score_consistency}
+# Check score consistency across repetitions
+consistency_results <- check_score_consistency(metric_data)
+
+cat("Score Consistency Analysis:\n")
+cat("Total unique combinations:", nrow(consistency_results), "\n")
+cat("Perfectly consistent combinations:", sum(consistency_results$is_consistent), "\n")
+cat("Percentage consistent:", round(100 * mean(consistency_results$is_consistent), 2), "%\n")
+
+# Show the most inconsistent combinations
+inconsistent <- consistency_results %>%
+  filter(!is_consistent) %>%
+  arrange(desc(score_range)) %>%
+  slice_head(n = 10)
+
+if (nrow(inconsistent) > 0) {
+  kable(inconsistent,
+        digits = 4,
+        caption = "Top 10 Most Inconsistent Dataset×Method×Metric Combinations") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"))
 } else {
-  cat("No seed data found in the dataset. Skipping seed variability analysis.\n")
+  cat("All combinations are perfectly consistent!")
 }
 ```
 
-```{r seed_variability_metrics, eval=exists("has_seeds") && has_seeds}
-# Analyze seed variability for methods
-# Define analyze_seed_variability if it doesn't exist (for backward compatibility)
-if(!exists("analyze_seed_variability") && has_seeds) {
-  analyze_seed_variability <- function(data) {
-    # Simple implementation if the function is missing
-    return(data %>%
-      dplyr::filter(!is.na(seed)) %>%
-      dplyr::group_by(dataset_generator, dataset_name, method, metric, backend) %>%
-      dplyr::summarize(
-        n_seeds = dplyr::n_distinct(seed),
-        mean_score = mean(score, na.rm = TRUE),
-        min_score = min(score, na.rm = TRUE),
-        max_score = max(score, na.rm = TRUE),
-        score_range = max_score - min_score,
-        score_sd = sd(score, na.rm = TRUE),
-        coefficient_of_variation = score_sd / abs(mean_score + 1e-10),
-        .groups = "drop"
-      ) %>%
-      dplyr::filter(n_seeds > 1) %>%
-      dplyr::arrange(desc(coefficient_of_variation)))
+### Backend Consistency Summary
+
+```{r backend_consistency}
+# Summarize consistency by backend
+if (nlevels(metric_data$backend) > 1) {
+  backend_consistency <- summarize_backend_consistency(metric_data)
+
+  kable(backend_consistency,
+        digits = 2,
+        caption = "Score Consistency Summary by Backend") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"))
+} else {
+  cat("Only one backend available, skipping backend consistency analysis")
+}
+```
+
+### Data Quality Flags
+
+```{r data_quality}
+# Analyze data quality flags in metric data
+quality_summary <- metric_data %>%
+  summarize(
+    total_records = n(),
+    empty_files = sum(empty_file, na.rm = TRUE),
+    duplicate_k_anomalies = sum(duplicate_k_anomaly, na.rm = TRUE),
+    missing_true_k_scores = sum(missing_true_k_score, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("Data Quality Summary:\n")
+cat("Total records:", quality_summary$total_records, "\n")
+cat("Empty files:", quality_summary$empty_files,
+    paste0("(", round(100 * quality_summary$empty_files / quality_summary$total_records, 2), "%)"), "\n")
+cat("Duplicate k anomalies:", quality_summary$duplicate_k_anomalies,
+    paste0("(", round(100 * quality_summary$duplicate_k_anomalies / quality_summary$total_records, 2), "%)"), "\n")
+cat("Missing true k scores:", quality_summary$missing_true_k_scores,
+    paste0("(", round(100 * quality_summary$missing_true_k_scores / quality_summary$total_records, 2), "%)"), "\n")
+
+# Show distribution of quality issues by backend and method
+if (quality_summary$empty_files > 0 || quality_summary$duplicate_k_anomalies > 0 || quality_summary$missing_true_k_scores > 0) {
+  quality_by_method <- metric_data %>%
+    group_by(backend, method) %>%
+    summarize(
+      total = n(),
+      empty_files = sum(empty_file, na.rm = TRUE),
+      duplicate_k = sum(duplicate_k_anomaly, na.rm = TRUE),
+      missing_true_k = sum(missing_true_k_score, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    filter(empty_files > 0 | duplicate_k > 0 | missing_true_k > 0) %>%
+    arrange(desc(empty_files + duplicate_k + missing_true_k))
+
+  if (nrow(quality_by_method) > 0) {
+    kable(quality_by_method,
+          caption = "Data Quality Issues by Backend and Method") %>%
+      kable_styling(bootstrap_options = c("striped", "hover"))
   }
 }
+```
 
-if(has_seeds) {
-  seed_variability <- analyze_seed_variability(data)
+## Seed Variability Analysis
 
-  # Display top methods with highest variability across seeds
-  seed_variability %>%
-    select(method, dataset_name, metric, backend, n_seeds, mean_score, score_sd, coefficient_of_variation) %>%
-    arrange(desc(coefficient_of_variation)) %>%
-    head(12) %>%
-    kable(caption = "Top 12 Method-Dataset Combinations with Highest Seed Variability") %>%
-    kable_styling()
+```{r seed_analysis, eval=has_seed_data(metric_data)}
+if (has_seed_data(metric_data)) {
+  cat("Seed data is available. Analyzing seed variability...\n")
+
+  # Analyze seed variability in execution times
+  if (has_seed_data(method_data)) {
+    cat("\n=== EXECUTION TIME SEED VARIABILITY ===\n")
+    time_variability <- analyze_execution_time_variability(method_data)
+
+    cat("Top 10 most variable dataset×method combinations (execution time):\n")
+    print(kable(head(time_variability, 10), digits = 3) %>%
+            kable_styling(bootstrap_options = c("striped", "hover")))
+  }
+
+  # Analyze seed variability in scores
+  cat("\n=== CLUSTERING SCORE SEED VARIABILITY ===\n")
+  score_variability <- analyze_score_variability(metric_data)
+
+  cat("Top 10 most variable dataset×method×metric combinations (scores):\n")
+  print(kable(head(score_variability, 10), digits = 4) %>%
+          kable_styling(bootstrap_options = c("striped", "hover")))
+
+} else {
+  cat("No seed data available for variability analysis.")
 }
 ```
 
-```{r method_seed_variability_plot, eval=exists("has_seeds") && has_seeds, fig.width=10, fig.height=7}
-# Check if plot_method_seed_variability exists (backward compatibility)
-if(!exists("plot_method_seed_variability") && has_seeds) {
-  # Define a simple version if missing
-  plot_method_seed_variability <- function(data, metric_filter=NULL, dataset_filter=NULL, method_filter=NULL, top_n=NULL) {
-    # Filter data
-    filtered_data <- data %>% dplyr::filter(!is.na(seed))
+### Seed Variability Visualization
 
-    if(!is.null(metric_filter)) {
-      filtered_data <- filtered_data %>% dplyr::filter(metric == metric_filter)
+```{r seed_plots, eval=has_seed_data(metric_data), fig.width=12, fig.height=8}
+if (has_seed_data(metric_data)) {
+  # Get the first few dataset-metric combinations for plotting
+  dataset_metric_combinations <- metric_data %>%
+    select(dataset_generator, dataset_name, metric) %>%
+    distinct() %>%
+    slice_head(n = 4)
+
+  seed_plots <- list()
+
+  for (i in 1:nrow(dataset_metric_combinations)) {
+    combo <- dataset_metric_combinations[i, ]
+
+    tryCatch({
+      p <- plot_method_seed_variability(
+        metric_data,
+        combo$dataset_generator,
+        combo$dataset_name,
+        combo$metric,
+        top_n = 8
+      )
+      seed_plots[[i]] <- p
+    }, error = function(e) {
+      cat("Skipping", combo$dataset_generator, combo$dataset_name, combo$metric, "- insufficient data\n")
+    })
+  }
+
+  if (length(seed_plots) > 0) {
+    combined_seed_plots <- wrap_plots(seed_plots, ncol = 2)
+    print(combined_seed_plots)
+  }
+}
+```
+
+### Seed Sensitivity Heatmap
+
+```{r seed_heatmap, eval=has_seed_data(metric_data), fig.width=14, fig.height=10}
+if (has_seed_data(metric_data)) {
+  # Create heatmap for the most common metric
+  common_metrics <- metric_data %>%
+    count(metric, sort = TRUE) %>%
+    slice_head(n = 3) %>%
+    pull(metric)
+
+  heatmap_plots <- list()
+
+  for (metric_name in common_metrics) {
+    tryCatch({
+      p <- plot_seed_sensitivity_heatmap(metric_data, metric_name, top_methods = 12, top_datasets = 8)
+      heatmap_plots[[metric_name]] <- p
+    }, error = function(e) {
+      cat("Skipping heatmap for", metric_name, "- insufficient data\n")
+    })
+  }
+
+  if (length(heatmap_plots) > 0) {
+    combined_heatmaps <- wrap_plots(heatmap_plots, ncol = 1)
+    print(combined_heatmaps)
+  }
+}
+```
+
+## Performance vs Quality Trade-offs
+
+```{r performance_quality, fig.width=12, fig.height=8}
+# Analyze the relationship between execution time and clustering quality
+# Join method and metric data to analyze trade-offs
+combined_data <- metric_data %>%
+  left_join(
+    method_data %>% select(source_dir, backend, run_timestamp, dataset_generator,
+                          dataset_name, method, seed, execution_time_seconds),
+    by = c("source_dir", "backend", "run_timestamp", "dataset_generator",
+           "dataset_name", "method", "seed")
+  )
+
+# Create scatter plots showing time vs quality trade-offs for different metrics
+common_metrics <- combined_data %>%
+  count(metric, sort = TRUE) %>%
+  slice_head(n = 4) %>%
+  pull(metric)
+
+tradeoff_plots <- list()
+
+for (metric_name in common_metrics) {
+  p <- combined_data %>%
+    filter(metric == metric_name, !is.na(execution_time_seconds), !is.na(score)) %>%
+    ggplot(aes(x = execution_time_seconds, y = score, color = method)) +
+    geom_point(alpha = 0.6) +
+    scale_x_log10() +
+    labs(
+      title = paste("Execution Time vs", metric_name),
+      x = "Execution Time (seconds, log scale)",
+      y = metric_name
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+
+  tradeoff_plots[[metric_name]] <- p
+}
+
+if (length(tradeoff_plots) > 0) {
+  combined_tradeoffs <- wrap_plots(tradeoff_plots, ncol = 2)
+  print(combined_tradeoffs)
+}
+```
+
+## Summary 
+
+```{r summary}
+cat("=== CLUSTERING BENCHMARK ANALYSIS SUMMARY ===\n")
+
+# Overall statistics
+cat("\nDataset Coverage:\n")
+cat("- Backends tested:", nlevels(method_data$backend), "\n")
+cat("- Dataset generators:", nlevels(method_data$dataset_generator), "\n")
+cat("- Unique datasets:", nrow(method_data %>% distinct(dataset_generator, dataset_name)), "\n")
+cat("- Clustering methods:", nlevels(method_data$method), "\n")
+cat("- Evaluation metrics:", nlevels(metric_data$metric), "\n")
+
+# Performance summary
+cat("\nPerformance Summary:\n")
+overall_time_stats <- method_data %>%
+  summarize(
+    median_time = median(execution_time_seconds, na.rm = TRUE),
+    mean_time = mean(execution_time_seconds, na.rm = TRUE),
+    min_time = min(execution_time_seconds, na.rm = TRUE),
+    max_time = max(execution_time_seconds, na.rm = TRUE)
+  )
+
+cat("- Median execution time:", round(overall_time_stats$median_time, 2), "seconds\n")
+cat("- Mean execution time:", round(overall_time_stats$mean_time, 2), "seconds\n")
+cat("- Execution time range:", round(overall_time_stats$min_time, 2), "-", round(overall_time_stats$max_time, 2), "seconds\n")
+
+# Quality summary
+overall_score_stats <- metric_data %>%
+  group_by(metric) %>%
+  summarize(
+    median_score = median(score, na.rm = TRUE),
+    mean_score = mean(score, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("\nClustering Quality Summary:\n")
+for (i in 1:nrow(overall_score_stats)) {
+  cat("-", overall_score_stats$metric[i], ": median =", round(overall_score_stats$median_score[i], 3),
+      ", mean =", round(overall_score_stats$mean_score[i], 3), "\n")
+}
+
+# Data quality
+cat("\nData Quality:\n")
+cat("- Score consistency:", round(100 * mean(consistency_results$is_consistent), 1), "% of combinations have consistent scores\n")
+cat("- Data completeness:", round(100 * (1 - sum(metric_data$empty_file) / nrow(metric_data)), 1), "% of files processed successfully\n")
+
+if (has_seed_data(metric_data)) {
+  cat("- Seed variability: Analysis completed (see plots above)\n")
+} else {
+  cat("- Seed variability: No seed data available\n")
+}
+```
+
+## Appendix: Exploring Metric Variability
+
+```{r glm_score_analysis, eval=has_seed_data(metric_data)}
+if (has_seed_data(metric_data)) {
+  cat("=== GLM ANALYSIS: FACTORS AFFECTING CLUSTERING SCORES AT TRUE K ===\n")
+
+  # Prepare data for GLM analysis using actual score values at true k
+  score_data_glm <- metric_data %>%
+    filter(!is.na(seed), !is.na(score), !is.na(true_k)) %>%
+    # Create dataset identifier
+    mutate(
+      dataset = paste(dataset_generator, dataset_name, sep = "_"),
+      seed_factor = factor(seed)  # Treat seed as a categorical factor
+    ) %>%
+    # Filter for reasonable score ranges (remove extreme outliers)
+    filter(score >= -1, score <= 1, !is.infinite(score)) %>%
+    # Ensure we have multiple observations per combination
+    group_by(dataset, method, metric, backend) %>%
+    filter(n() >= 3) %>%  # At least 3 observations per combination
+    ungroup()
+
+  cat("Data prepared for GLM analysis:\n")
+  cat("- Total score observations:", nrow(score_data_glm), "\n")
+  cat("- Unique datasets:", n_distinct(score_data_glm$dataset), "\n")
+  cat("- Unique methods:", n_distinct(score_data_glm$method), "\n")
+  cat("- Unique metrics:", n_distinct(score_data_glm$metric), "\n")
+  cat("- Unique backends:", n_distinct(score_data_glm$backend), "\n")
+  cat("- Unique seeds:", n_distinct(score_data_glm$seed_factor), "\n")
+
+  if (nrow(score_data_glm) > 50) {  # Only proceed if we have sufficient data
+
+    # Fit GLM models with different complexity levels
+    cat("\n=== FITTING LINEAR MODELS ===\n")
+
+    # Model 1: Main effects without seed
+    model1 <- lm(score ~ dataset + method + metric + backend,
+                 data = score_data_glm)
+
+    # Model 2: Main effects with seed as a factor
+    model2 <- lm(score ~ dataset + method + metric + backend + seed_factor,
+                 data = score_data_glm)
+
+    # Model 3: With method:metric interaction (without seed)
+    model3 <- lm(score ~ dataset + method + metric + backend + method:metric,
+                 data = score_data_glm)
+
+    # Model 4: Full model with seed and key interactions
+    model4 <- lm(score ~ dataset + method + metric + backend + seed_factor + method:metric,
+                 data = score_data_glm)
+
+    models <- list(model1, model2, model3, model4)
+    model_names <- c("Main effects (no seed)", "Main effects + seed",
+                    "Method:metric interaction (no seed)", "Full model (seed + interactions)")
+
+    # Model comparison
+    cat("Model comparison (AIC):\n")
+    aics <- sapply(models, AIC)
+    for (i in seq_along(models)) {
+      cat(paste0("Model ", i, " (", model_names[i], "): "), round(aics[i], 2), "\n")
     }
 
-    if(!is.null(dataset_filter)) {
-      filtered_data <- filtered_data %>% dplyr::filter(dataset_name == dataset_filter)
+    # Select best model based on AIC
+    best_model <- models[[which.min(aics)]]
+    best_model_name <- model_names[which.min(aics)]
+
+    cat("\nBest model:", best_model_name, "\n")
+
+    # Analysis of variance to see contribution of each factor
+    cat("\n=== ANALYSIS OF VARIANCE ===\n")
+    anova_result <- anova(best_model)
+    print(anova_result)
+
+    # Calculate percentage of variance explained by each factor
+    ss_total <- sum(anova_result$`Sum Sq`)
+    anova_result$Percent_Variance <- round(100 * anova_result$`Sum Sq` / ss_total, 2)
+
+    cat("\nVariance explained by each factor:\n")
+    factor_variance <- data.frame(
+      Factor = rownames(anova_result)[-nrow(anova_result)],  # Exclude residuals
+      Percent_Variance = anova_result$Percent_Variance[-nrow(anova_result)]
+    ) %>%
+      arrange(desc(Percent_Variance))
+
+    print(factor_variance)
+
+    # Model fit statistics
+    r2 <- summary(best_model)$r.squared
+    adj_r2 <- summary(best_model)$adj.r.squared
+    cat("\nModel Fit:\n")
+    cat("R-squared:", round(r2, 3), "\n")
+    cat("Adjusted R-squared:", round(adj_r2, 3), "\n")
+
+    # Special analysis: Compare models with and without seed
+    if ("seed_factor" %in% names(coef(best_model))) {
+      model_no_seed <- lm(score ~ dataset + method + metric + backend, data = score_data_glm)
+      model_with_seed <- lm(score ~ dataset + method + metric + backend + seed_factor, data = score_data_glm)
+
+      r2_no_seed <- summary(model_no_seed)$r.squared
+      r2_with_seed <- summary(model_with_seed)$r.squared
+      seed_contribution <- r2_with_seed - r2_no_seed
+
+      cat("\nSeed Factor Analysis:\n")
+      cat("R-squared without seed:", round(r2_no_seed, 3), "\n")
+      cat("R-squared with seed:", round(r2_with_seed, 3), "\n")
+      cat("Additional variance explained by seed:", round(seed_contribution, 3),
+          paste0("(", round(100 * seed_contribution, 1), "%)"), "\n")
     }
 
-    # Calculate stats by method and seed
-    method_stats <- filtered_data %>%
-      dplyr::group_by(method, backend) %>%
-      dplyr::summarize(
-        mean_score = mean(score, na.rm = TRUE),
-        sd_score = sd(score, na.rm = TRUE),
-        .groups = "drop"
+    # Store model summary for coefficient analysis in next chunk
+    glm_best_model <<- best_model  # Make available to next chunk
+    glm_factor_variance <<- factor_variance  # Make variance data available
+
+    cat("\n=== COEFFICIENT ANALYSIS ===\n")
+    cat("Coefficient analysis displayed in table below.\n")
+
+    cat("\n=== FACTOR IMPORTANCE ANALYSIS ===\n")
+    cat("Factor importance analysis displayed in tables below.\n")
+
+    # Residual diagnostics
+    cat("\n=== MODEL DIAGNOSTICS ===\n")
+
+    if (class(best_model)[1] == "glm") {
+      # GLM residual plots
+      residuals_df <- data.frame(
+        fitted = fitted(best_model),
+        residuals = residuals(best_model, type = "pearson"),
+        standardized_residuals = rstandard(best_model)
       )
 
-    # Create the plot
-    return(ggplot(method_stats, aes(x = method, y = mean_score, fill = backend)) +
-      geom_bar(stat = "identity", position = position_dodge(width = 0.9), alpha = 0.7) +
-      geom_errorbar(
-        aes(ymin = mean_score - sd_score, ymax = mean_score + sd_score),
-        position = position_dodge(width = 0.9),
-        width = 0.25
-      ) +
-      labs(
-        title = "Method Performance with Seed Variability",
-        x = "Method",
-        y = "Average Score"
-      ) +
-      theme_minimal() +
-      theme(
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        legend.position = "top"
-      ))
-  }
-}
-
-# Plot method performance with seed variability error bars
-if(has_seeds) {
-  # Use the first metric for initial analysis
-  first_metric <- levels(data$metric)[1]
-
-  # Create plot for all datasets with first metric
-  method_seed_plot <- plot_method_seed_variability(data,
-                                                  metric_filter = first_metric)
-  print(method_seed_plot)
-
-  # If there are multiple metrics, try another one
-  if(length(levels(data$metric)) > 1) {
-    second_metric <- levels(data$metric)[2]
-    method_seed_plot2 <- plot_method_seed_variability(data,
-                                                     metric_filter = second_metric)
-    print(method_seed_plot2)
-  }
-}
-```
-
-```{r seed_sensitivity_heatmap, eval=exists("has_seeds") && has_seeds, fig.width=10, fig.height=8}
-# Check if plot_seed_sensitivity_heatmap exists (for backward compatibility)
-if(!exists("plot_seed_sensitivity_heatmap") && has_seeds) {
-  # Define a simple version if missing
-  plot_seed_sensitivity_heatmap <- function(data, metric_filter=NULL, max_methods=NULL, max_datasets=NULL) {
-    # First compute seed CV
-    compute_seed_cv <- function(data) {
-      return(data %>%
-        dplyr::filter(!is.na(seed)) %>%
-        dplyr::group_by(dataset_generator, dataset_name, method, metric, backend) %>%
-        dplyr::summarize(
-          n_seeds = dplyr::n_distinct(seed),
-          mean_score = mean(score, na.rm = TRUE),
-          sd_score = sd(score, na.rm = TRUE),
-          cv = sd_score / abs(mean_score + 1e-10),
-          .groups = "drop"
-        ) %>%
-        dplyr::filter(n_seeds > 1))
-    }
-
-    # Filter data
-    filtered_data <- data %>% dplyr::filter(!is.na(seed))
-
-    if(!is.null(metric_filter)) {
-      filtered_data <- filtered_data %>% dplyr::filter(metric == metric_filter)
-    }
-
-    # Calculate CV
-    cv_data <- compute_seed_cv(filtered_data)
-
-    if(nrow(cv_data) == 0) {
-      return(ggplot() +
-               annotate("text", x = 0.5, y = 0.5, label = "No valid data for heatmap") +
-               theme_void())
-    }
-
-    # Create the heatmap
-    return(ggplot(cv_data, aes(x = method, y = dataset_name, fill = cv)) +
-      geom_tile() +
-      scale_fill_viridis_c(name = "Coefficient of\nVariation (CV)") +
-      labs(
-        title = "Seed Sensitivity Heatmap",
-        x = "Method",
-        y = "Dataset"
-      ) +
-      theme_minimal() +
-      theme(
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        legend.position = "right"
-      ))
-  }
-}
-
-# Create heatmap of seed sensitivity
-if(has_seeds) {
-  # Create heatmap for first metric
-  first_metric <- levels(data$metric)[1]
-  sensitivity_heatmap <- plot_seed_sensitivity_heatmap(data,
-                                                      metric_filter = first_metric,
-                                                      max_methods = 15,  # Limit to most variable methods
-                                                      max_datasets = 10) # Limit to most variable datasets
-  print(sensitivity_heatmap)
-
-  # If there are multiple metrics, try another one
-  if(length(levels(data$metric)) > 1) {
-    second_metric <- levels(data$metric)[2]
-    sensitivity_heatmap2 <- plot_seed_sensitivity_heatmap(data,
-                                                         metric_filter = second_metric,
-                                                         max_methods = 15,
-                                                         max_datasets = 10)
-    print(sensitivity_heatmap2)
-  }
-}
-```
-
-The coefficient of variation measures the sensitivity of the method-metric-dataset combination to changes in random seed initialization.
-
-## Dataset-Specific Seed Sensitivity
-
-```{r dataset_specific_analysis, eval=exists("has_seeds") && has_seeds, fig.width=10, fig.height=6}
-# Analyze seed sensitivity for specific datasets
-if(has_seeds) {
-  # Get unique datasets
-  unique_datasets <- unique(data$dataset_name)
-
-  # Choose up to 3 datasets for focused analysis
-  datasets_to_analyze <- head(unique_datasets, 3)
-
-  for(ds in datasets_to_analyze) {
-    cat("\n### Dataset:", ds, "\n")
-
-    # Filter data for this dataset
-    ds_data <- data %>% filter(dataset_name == ds, !is.na(seed))
-
-    # Count seeds per method for this dataset
-    seed_counts <- ds_data %>%
-      group_by(method) %>%
-      summarize(unique_seeds = n_distinct(seed),
-                .groups = "drop") %>%
-      arrange(desc(unique_seeds))
-
-    # Display methods with most seeds
-    print(seed_counts %>%
-            head(5) %>%
-            kable(caption = paste("Number of unique seeds per method for", ds)) %>%
-            kable_styling())
-
-    # Calculate variability metrics for this dataset
-    ds_variability <- ds_data %>%
-      group_by(method, metric, backend) %>%
-      summarize(
-        n_seeds = n_distinct(seed),
-        mean_score = mean(score, na.rm = TRUE),
-        sd_score = sd(score, na.rm = TRUE),
-        cv = sd_score / abs(mean_score + 1e-10),  # Add small constant to avoid division by zero
-        .groups = "drop"
-      ) %>%
-      filter(n_seeds > 1) %>%
-      arrange(desc(cv))
-
-    # Create plot for this dataset using the first metric
-    first_metric <- levels(ds_data$metric)[1]
-    if(!is.null(first_metric)) {
-      ds_plot <- plot_method_seed_variability(
-        data,
-        dataset_filter = ds,
-        metric_filter = first_metric
-      )
-      print(ds_plot)
-    }
-
-    # Box plot showing distribution of scores across seeds for top methods
-    top_methods <- head(ds_variability$method, 5)
-
-    if(length(top_methods) > 0) {
-      box_plot <- ds_data %>%
-        filter(method %in% top_methods, metric == first_metric) %>%
-        ggplot(aes(x = method, y = score, fill = method)) +
-        geom_boxplot() +
+      p_resid <- ggplot(residuals_df, aes(x = fitted, y = standardized_residuals)) +
+        geom_point(alpha = 0.6) +
+        geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+        geom_smooth(se = FALSE, color = "blue") +
         labs(
-          title = paste("Distribution of Scores Across Seeds for", ds),
-          subtitle = paste("Metric:", first_metric),
-          x = "Method",
-          y = "Score"
+          title = "Residuals vs Fitted Values",
+          x = "Fitted Values",
+          y = "Standardized Residuals"
         ) +
-        theme_minimal() +
-        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+        theme_minimal()
 
-      print(box_plot)
-    }
-  }
-}
-```
-
-This dataset-specific analysis reveals how the same method can show different levels of sensitivity to random seeds depending on the dataset characteristics. Some methods may be highly stable across seeds for one dataset but show significant variability for another, highlighting the interaction between dataset properties and algorithm stochasticity.
-
-## Metric-Specific Seed Sensitivity
-
-```{r metric_comparison, eval=exists("has_seeds") && has_seeds, fig.width=10, fig.height=8}
-# Compare seed sensitivity across different metrics
-if(has_seeds) {
-  # Get unique metrics
-  unique_metrics <- levels(data$metric)
-
-  if(length(unique_metrics) > 1) {
-    # Calculate CV for each method-metric combination
-    metric_cv_data <- data %>%
-      filter(!is.na(seed)) %>%
-      group_by(method, metric, backend) %>%
-      summarize(
-        n_seeds = n_distinct(seed),
-        mean_score = mean(score, na.rm = TRUE),
-        sd_score = sd(score, na.rm = TRUE),
-        cv = sd_score / abs(mean_score + 1e-10),
-        .groups = "drop"
-      ) %>%
-      filter(n_seeds > 1)
-
-    # Find methods with data for multiple metrics
-    methods_with_multiple_metrics <- metric_cv_data %>%
-      group_by(method) %>%
-      filter(n_distinct(metric) > 1) %>%
-      ungroup() %>%
-      distinct(method) %>%
-      pull(method)
-
-    if(length(methods_with_multiple_metrics) > 0) {
-      # Filter for these methods
-      multi_metric_data <- metric_cv_data %>%
-        filter(method %in% methods_with_multiple_metrics)
-
-      # Create comparison plot
-      metric_comparison_plot <- ggplot(multi_metric_data,
-                             aes(x = method, y = cv, fill = metric)) +
-        geom_bar(stat = "identity", position = "dodge") +
-        labs(
-          title = "Comparison of Seed Sensitivity Across Metrics",
-          subtitle = "Higher coefficient of variation (CV) indicates greater sensitivity to random seeds",
-          x = "Method",
-          y = "Coefficient of Variation (CV)"
-        ) +
-        theme_minimal() +
-        theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-      print(metric_comparison_plot)
-
-      # Create heatmap for comparing metrics
-      metric_heatmap <- multi_metric_data %>%
-        ggplot(aes(x = method, y = metric, fill = cv)) +
-        geom_tile() +
-        scale_fill_viridis_c(name = "CV") +
-        labs(
-          title = "Heatmap of Seed Sensitivity by Method and Metric",
-          x = "Method",
-          y = "Metric"
-        ) +
-        theme_minimal() +
-        theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-      print(metric_heatmap)
-
-      # Summarize which metrics are most affected by seeds
-      metric_summary <- multi_metric_data %>%
-        group_by(metric) %>%
-        summarize(
-          avg_cv = mean(cv, na.rm = TRUE),
-          max_cv = max(cv, na.rm = TRUE),
-          n_methods = n(),
-          .groups = "drop"
-        ) %>%
-        arrange(desc(avg_cv))
-
-      print(metric_summary %>%
-              kable(caption = "Metrics Ranked by Average Seed Sensitivity") %>%
-              kable_styling())
+      print(p_resid)
     } else {
-      cat("No methods have data for multiple metrics with seed variation.\n")
+      # LM residual plots
+      par(mfrow = c(2, 2))
+      plot(best_model)
+      par(mfrow = c(1, 1))
     }
+
+    # Summary of findings
+    cat("\n=== SUMMARY OF GLM FINDINGS ===\n")
+    cat("1. Model Performance:\n")
+    if (class(best_model)[1] == "glm") {
+      cat("   - Pseudo R-squared:", round(pseudo_r2, 3), "- model explains",
+          round(pseudo_r2 * 100, 1), "% of deviance\n")
+    } else {
+      cat("   - R-squared:", round(summary(best_model)$r.squared, 3), "\n")
+    }
+
+    if (exists("glm_factor_variance") && "seed_factor" %in% glm_factor_variance$Factor) {
+      seed_variance <- glm_factor_variance$Percent_Variance[glm_factor_variance$Factor == "seed_factor"]
+      cat("2. Seed factor explains", round(seed_variance, 1), "% of total variance in scores\n")
+    }
+
+    cat("3. Factor importance tables and visualization shown below.\n")
+
   } else {
-    cat("Only one metric available. Cannot compare seed sensitivity across metrics.\n")
+    cat("Insufficient data for GLM analysis (need > 50 observations)\n")
   }
+
+} else {
+  cat("Seed data is required for score variability analysis. Skipping GLM modeling.\n")
 }
 ```
 
+### Variance Explained by Each Factor
 
-# Conclusions
-
-Key findings include:
-
-- [conclusions here]
-
-# Next Steps
-
-- [to be explored at a later stage]
-
-# Session Information
-
-```{r session_info}
-# Print session information for reproducibility
-sessionInfo()
+```{r variance_explained_table, eval=exists("glm_factor_variance")}
+if (exists("glm_factor_variance")) {
+  kable(glm_factor_variance,
+        digits = 2,
+        caption = "Percentage of Variance Explained by Each Factor",
+        col.names = c("Factor", "% Variance Explained")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"))
+}
 ```
+
+### Coefficient Analysis Tables
+
+```{r coefficient_tables, eval=exists("glm_best_model")}
+if (exists("glm_best_model")) {
+  coef_summary <- summary(glm_best_model)$coefficients
+
+  # Create coefficient data frame (linear model)
+  coef_df <- data.frame(
+    Factor = rownames(coef_summary),
+    Coefficient = coef_summary[, 1],
+    SE = coef_summary[, 2],
+    t_value = coef_summary[, 3],
+    P_value = coef_summary[, 4],
+    stringsAsFactors = FALSE
+  )
+
+  # Remove intercept and sort by absolute coefficient value
+  coef_df <- coef_df %>%
+    filter(Factor != "(Intercept)") %>%
+    mutate(Abs_Coefficient = abs(Coefficient)) %>%
+    arrange(desc(Abs_Coefficient))
+
+  # Display coefficient table
+  kable(head(coef_df, 20),
+        digits = 4,
+        caption = "Top 20 Factors by Coefficient Magnitude (Linear Model on Score)",
+        col.names = c("Factor", "Coefficient", "SE", "t-value", "P-value", "Abs Coeff")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+    scroll_box(height = "400px")
+}
+```
+
+```{r factor_importance_tables, eval=exists("glm_best_model")}
+if (exists("glm_best_model")) {
+  # Factor importance analysis
+  coef_importance <- coef_df %>%
+    mutate(
+      Factor_Type = case_when(
+        str_detect(Factor, "^dataset") ~ "Dataset",
+        str_detect(Factor, "^method") ~ "Method",
+        str_detect(Factor, "^metric") ~ "Metric",
+        str_detect(Factor, "^backend") ~ "Backend",
+        str_detect(Factor, "^seed_factor") ~ "Seed",
+        str_detect(Factor, ":") ~ "Interaction",
+        TRUE ~ "Other"
+      )
+    ) %>%
+    group_by(Factor_Type) %>%
+    summarize(
+      n_significant = sum(P_value < 0.05),
+      n_total = n(),
+      prop_significant = n_significant / n_total,
+      mean_abs_coef = mean(abs(Coefficient)),
+      max_abs_coef = max(abs(Coefficient)),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(mean_abs_coef))
+
+  kable(coef_importance,
+        digits = 3,
+        caption = "Factor Type Importance Summary (by Mean Absolute Coefficient)",
+        col.names = c("Factor Type", "# Significant", "# Total", "Prop. Significant",
+                     "Mean |Coeff|", "Max |Coeff|")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"))
+
+  # Create visualization of factor effects
+  coef_plot_data <- coef_df %>%
+    mutate(
+      Factor_Type = case_when(
+        str_detect(Factor, "^dataset") ~ "Dataset",
+        str_detect(Factor, "^method") ~ "Method",
+        str_detect(Factor, "^metric") ~ "Metric",
+        str_detect(Factor, "^backend") ~ "Backend",
+        str_detect(Factor, "^seed_factor") ~ "Seed",
+        str_detect(Factor, ":") ~ "Interaction",
+        TRUE ~ "Other"
+      ),
+      Significant = P_value < 0.05
+    ) %>%
+    filter(Factor_Type != "Other") %>%
+    slice_head(n = 30)  # Top 30 for readability
+
+  p_coef <- ggplot(coef_plot_data, aes(x = reorder(Factor, Abs_Coefficient),
+                                      y = Coefficient,
+                                      fill = Factor_Type,
+                                      alpha = Significant)) +
+    geom_col() +
+    coord_flip() +
+    scale_alpha_manual(values = c("TRUE" = 1.0, "FALSE" = 0.3)) +
+    labs(
+      title = "Linear Model Coefficients: Factors Affecting Clustering Scores",
+      subtitle = "Top 30 factors by coefficient magnitude",
+      x = "Factor",
+      y = "Coefficient (Score Impact)",
+      fill = "Factor Type",
+      alpha = "Significant (p < 0.05)"
+    ) +
+    theme_minimal() +
+    theme(axis.text.y = element_text(size = 8))
+
+  print(p_coef)
+}
+```
+
+---
+
+*Analysis generated on `r Sys.time()` using ClustBench analysis pipeline.*
