@@ -211,75 +211,6 @@ def extract_method_info(path: str) -> Dict[str, Any]:
 
         current_dir = os.path.dirname(current_dir)
 
-    # If we still don't have a method, check the path components directly
-    # Look for methods that are in proper clustering directory structure
-    # path_parts = path.split(os.sep)
-
-    # Find the clustering directory index
-    """
-    clustering_idx = -1
-    for i, part in enumerate(path_parts):
-        if part == 'clustering':
-            clustering_idx = i
-            break
-    """
-
-    # If we found a clustering directory, look for methods after it
-    """
-    if clustering_idx >= 0:
-        for i in range(clustering_idx + 1, len(path_parts)):
-            part = path_parts[i]
-            seed_match = re.search(r'method-(.+?)_seed-(\d+)', part)
-            if seed_match:
-                result['method'] = normalize_method_name(seed_match.group(1))
-                result['seed'] = int(seed_match.group(2))
-                return result
-            elif part.startswith('method-'):
-                result['method'] = normalize_method_name(part.split('-', 1)[1])
-                return result
-            elif part.startswith('linkage-') and i > 0:
-                if path_parts[i-1] in ['agglomerative', 'fastcluster', 'sklearn']:
-                    # Check if linkage part has seed
-                    linkage_seed_match = re.search(r'linkage-(.+?)_seed-(\d+)', part)
-                    if linkage_seed_match:
-                        linkage_name = f"linkage-{linkage_seed_match.group(1)}"
-                        result['method'] = f"{path_parts[i-1]}_{linkage_name}"
-                        result['seed'] = int(linkage_seed_match.group(2))
-                        return result
-                    else:
-                        result['method'] = f"{path_parts[i-1]}_{part}"
-                        return result
-    """
-
-    # Fallback: look for any method pattern in the path, but only in path components
-    """
-    for i, part in enumerate(path_parts):
-        # Skip empty parts and file extensions
-        if not part or part.endswith('.gz'):
-            continue
-
-        seed_match = re.search(r'method-(.+?)_seed-(\d+)', part)
-        if seed_match:
-            result['method'] = normalize_method_name(seed_match.group(1))
-            result['seed'] = int(seed_match.group(2))
-            return result
-        elif part.startswith('method-'):
-            result['method'] = normalize_method_name(part.split('-', 1)[1])
-            return result
-        elif part.startswith('linkage-') and i > 0:
-            if path_parts[i-1] in ['agglomerative', 'fastcluster', 'sklearn']:
-                # Check if linkage part has seed
-                linkage_seed_match = re.search(r'linkage-(.+?)_seed-(\d+)', part)
-                if linkage_seed_match:
-                    linkage_name = f"linkage-{linkage_seed_match.group(1)}"
-                    result['method'] = f"{path_parts[i-1]}_{linkage_name}"
-                    result['seed'] = int(linkage_seed_match.group(2))
-                    return result
-                else:
-                    result['method'] = f"{path_parts[i-1]}_{part}"
-                    return result
-    """
-
     return result
 
 
@@ -303,10 +234,12 @@ def extract_metric_info(path: str) -> str:
                 pass
 
     # If we still don't have a metric, check the path components directly
+    """
     path_parts = path.split(os.sep)
     for part in path_parts:
         if part.startswith('metric-'):
             return part.split('-', 1)[1]
+    """
 
     return ''
 
@@ -478,8 +411,6 @@ def find_method_performance(file_path: str) -> Optional[float]:
                 # Read the data line
                 data_line = f.readline().strip()
 
-
-
                 if data_line:
                     data = data_line.split('\t')
                     # Find the 's' (seconds) column index
@@ -523,7 +454,6 @@ def extract_dataset_true_k_and_noise(file_path: str) -> Tuple[Optional[int], Opt
             return None, None
 
         # Only try to find labels files and count unique non-zero labels
-        import glob
         label_files = glob.glob(os.path.join(dataset_dir, 'clustbench.labels*.gz'))
         for label_file in label_files:
             try:
