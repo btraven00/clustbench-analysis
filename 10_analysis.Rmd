@@ -367,6 +367,249 @@ p_rss_heatmap <- peak_rss_data %>%
 print(p_rss_heatmap)
 ```
 
+## Runtime vs Memory Usage Trade-offs
+
+Pareto frontier analysis for runtime vs peak RSS memory usage trade-offs.
+Methods on the Pareto frontier achieve optimal trade-offs between execution speed and memory efficiency.
+
+```{r runtime_memory_functions}
+# Function to compute Pareto frontier
+compute_pareto_frontier <- function(data, x_col, y_col, minimize_x = TRUE, maximize_y = TRUE) {
+  # Remove rows with missing values
+  clean_data <- data %>%
+    filter(!is.na(!!sym(x_col)), !is.na(!!sym(y_col))) %>%
+    arrange(!!sym(x_col))
+
+  if (nrow(clean_data) == 0) return(clean_data)
+
+  pareto_points <- logical(nrow(clean_data))
+
+  for (i in 1:nrow(clean_data)) {
+    is_dominated <- FALSE
+
+    for (j in 1:nrow(clean_data)) {
+      if (i != j) {
+        x_better <- if (minimize_x) {
+          clean_data[[x_col]][j] <= clean_data[[x_col]][i]
+        } else {
+          clean_data[[x_col]][j] >= clean_data[[x_col]][i]
+        }
+
+        y_better <- if (maximize_y) {
+          clean_data[[y_col]][j] >= clean_data[[y_col]][i]
+        } else {
+          clean_data[[y_col]][j] <= clean_data[[y_col]][i]
+        }
+
+        # Check if j dominates i (j is at least as good in both dimensions and strictly better in at least one)
+        if (x_better && y_better &&
+            (clean_data[[x_col]][j] != clean_data[[x_col]][i] ||
+             clean_data[[y_col]][j] != clean_data[[y_col]][i])) {
+          is_dominated <- TRUE
+          break
+        }
+      }
+    }
+
+    pareto_points[i] <- !is_dominated
+  }
+
+  clean_data$is_pareto <- pareto_points
+  return(clean_data)
+}
+
+# Function to create runtime vs memory Pareto plot
+create_runtime_memory_pareto_plot <- function(data, title_suffix = "") {
+  # Prepare data - aggregate by method and dataset to reduce noise
+  method_performance <- data %>%
+    filter(!is.na(runtime), !is.na(peak_rss)) %>%
+    group_by(method, dataset_generator, dataset_name) %>%
+    summarize(
+      avg_runtime = mean(runtime, na.rm = TRUE),
+      avg_peak_rss_mb = mean(peak_rss / 1024, na.rm = TRUE),  # Convert to MB
+      .groups = "drop"
+    )
+
+  if (nrow(method_performance) == 0) return(NULL)
+
+  # Compute Pareto frontier (minimize both runtime and memory)
+  pareto_data <- compute_pareto_frontier(method_performance, "avg_runtime", "avg_peak_rss_mb",
+                                        minimize_x = TRUE, maximize_y = FALSE)
+
+  # Create the plot
+  p <- ggplot(pareto_data, aes(x = avg_runtime, y = avg_peak_rss_mb)) +
+    geom_point(aes(color = method, shape = is_pareto, size = is_pareto), alpha = 0.7) +
+    scale_shape_manual(values = c("FALSE" = 16, "TRUE" = 17),
+                      name = "Pareto Optimal",
+                      labels = c("No", "Yes")) +
+    scale_size_manual(values = c("FALSE" = 2, "TRUE" = 3), guide = "none") +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(
+      title = paste("Runtime vs Memory Usage Pareto Frontier", title_suffix),
+      subtitle = "Triangle points indicate Pareto-optimal methods (faster + less memory)",
+      x = "Average Runtime (seconds, log scale)",
+      y = "Average Peak RSS (MB, log scale)",
+      color = "Method"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom", legend.box = "horizontal") +
+    guides(color = guide_legend(override.aes = list(size = 3)))
+
+  # Add Pareto frontier line
+  pareto_frontier <- pareto_data %>%
+    filter(is_pareto) %>%
+    arrange(avg_runtime)
+
+  if (nrow(pareto_frontier) > 1) {
+    p <- p + geom_step(data = pareto_frontier,
+                       aes(x = avg_runtime, y = avg_peak_rss_mb),
+                       color = "red", alpha = 0.6, size = 1,
+                       direction = "hv", inherit.aes = FALSE)
+  }
+
+  return(p)
+}
+```
+
+```{r runtime_memory_pareto, fig.width=14, fig.height=10}
+cat("=== RUNTIME vs MEMORY USAGE PARETO ANALYSIS ===\n")
+
+# Overall analysis across all datasets
+overall_plot <- create_runtime_memory_pareto_plot(method_data, "- Overall")
+
+if (!is.null(overall_plot)) {
+  print(overall_plot)
+}
+
+# Find the largest dataset by number of data points or features
+largest_dataset_info <- method_data %>%
+  filter(!is.na(runtime), !is.na(peak_rss)) %>%
+  group_by(dataset_generator, dataset_name) %>%
+  summarize(
+    n_runs = n(),
+    avg_runtime = mean(runtime, na.rm = TRUE),
+    avg_memory = mean(peak_rss, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Use average memory as proxy for dataset size (larger datasets typically use more memory)
+  arrange(desc(avg_memory)) %>%
+  slice_head(n = 1)
+
+if (nrow(largest_dataset_info) > 0) {
+  cat("\nFocusing on largest dataset:", largest_dataset_info$dataset_generator,
+      largest_dataset_info$dataset_name, "\n")
+  cat("- Average runtime:", round(largest_dataset_info$avg_runtime, 2), "seconds\n")
+  cat("- Average memory:", round(largest_dataset_info$avg_memory / 1024, 1), "MB\n")
+  cat("- Number of runs:", largest_dataset_info$n_runs, "\n")
+
+  # Filter data for the largest dataset
+  largest_dataset_data <- method_data %>%
+    filter(dataset_generator == largest_dataset_info$dataset_generator,
+           dataset_name == largest_dataset_info$dataset_name)
+
+  # Create Pareto plot for largest dataset
+  largest_dataset_plot <- create_runtime_memory_pareto_plot(
+    largest_dataset_data,
+    paste("- Largest Dataset:", largest_dataset_info$dataset_generator, largest_dataset_info$dataset_name)
+  )
+
+  if (!is.null(largest_dataset_plot)) {
+    print(largest_dataset_plot)
+  }
+}
+```
+
+## Runtime vs Memory Pareto Summary
+
+```{r runtime_memory_summary}
+# Compute Pareto-optimal methods for runtime vs memory
+runtime_memory_performance <- method_data %>%
+  filter(!is.na(runtime), !is.na(peak_rss)) %>%
+  group_by(method, dataset_generator, dataset_name) %>%
+  summarize(
+    avg_runtime = mean(runtime, na.rm = TRUE),
+    avg_peak_rss_mb = mean(peak_rss / 1024, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+if (nrow(runtime_memory_performance) > 0) {
+  pareto_runtime_memory <- compute_pareto_frontier(runtime_memory_performance,
+                                                  "avg_runtime", "avg_peak_rss_mb",
+                                                  minimize_x = TRUE, maximize_y = FALSE)
+
+  # Summary of Pareto-optimal methods
+  pareto_methods_summary <- pareto_runtime_memory %>%
+    filter(is_pareto) %>%
+    group_by(method) %>%
+    summarize(
+      datasets_on_frontier = n(),
+      avg_runtime_sec = mean(avg_runtime),
+      avg_memory_mb = mean(avg_peak_rss_mb),
+      min_runtime_sec = min(avg_runtime),
+      max_runtime_sec = max(avg_runtime),
+      min_memory_mb = min(avg_peak_rss_mb),
+      max_memory_mb = max(avg_peak_rss_mb),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(datasets_on_frontier))
+
+  cat("\n=== RUNTIME vs MEMORY PARETO-OPTIMAL METHODS ===\n")
+  kable(pareto_methods_summary,
+        digits = 2,
+        caption = "Methods on Runtime vs Memory Pareto Frontier",
+        col.names = c("Method", "Datasets on Frontier",
+                     "Avg Runtime (s)", "Avg Memory (MB)",
+                     "Min Runtime (s)", "Max Runtime (s)",
+                     "Min Memory (MB)", "Max Memory (MB)")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"))
+
+  # Performance characteristics of Pareto-optimal methods
+  cat("\n=== PERFORMANCE CHARACTERISTICS ===\n")
+
+  # Identify fastest methods on frontier
+  fastest_methods <- pareto_methods_summary %>%
+    slice_min(avg_runtime_sec, n = 3)
+
+  cat("Fastest Pareto-optimal methods:\n")
+  for (i in 1:nrow(fastest_methods)) {
+    cat(sprintf("  %d. %s: %.2f seconds, %.1f MB\n",
+                i, fastest_methods$method[i],
+                fastest_methods$avg_runtime_sec[i],
+                fastest_methods$avg_memory_mb[i]))
+  }
+
+  # Identify most memory-efficient methods on frontier
+  memory_efficient_methods <- pareto_methods_summary %>%
+    slice_min(avg_memory_mb, n = 3)
+
+  cat("\nMost memory-efficient Pareto-optimal methods:\n")
+  for (i in 1:nrow(memory_efficient_methods)) {
+    cat(sprintf("  %d. %s: %.1f MB, %.2f seconds\n",
+                i, memory_efficient_methods$method[i],
+                memory_efficient_methods$avg_memory_mb[i],
+                memory_efficient_methods$avg_runtime_sec[i]))
+  }
+
+  # Runtime vs memory efficiency ratio
+  efficiency_analysis <- pareto_methods_summary %>%
+    mutate(
+      efficiency_ratio = avg_runtime_sec / avg_memory_mb,
+      balanced_score = scale(avg_runtime_sec)[,1] + scale(avg_memory_mb)[,1]
+    ) %>%
+    arrange(balanced_score)
+
+  cat("\nMost balanced Pareto-optimal methods (runtime + memory):\n")
+  for (i in 1:min(3, nrow(efficiency_analysis))) {
+    cat(sprintf("  %d. %s: %.2f seconds, %.1f MB (balanced score: %.2f)\n",
+                i, efficiency_analysis$method[i],
+                efficiency_analysis$avg_runtime_sec[i],
+                efficiency_analysis$avg_memory_mb[i],
+                efficiency_analysis$balanced_score[i]))
+  }
+}
+```
+
 # Clustering Metric Score Analysis
 
 ## Backend Comparison - Clustering Scores
@@ -460,13 +703,14 @@ inconsistent <- consistency_results %>%
   slice_head(n = 10)
 
 if (nrow(inconsistent) > 0) {
-  kable(head(inconsistent, 10),
+  kable(inconsistent,
         digits = 4,
-        format = "latex",
-        caption = "Top 10 Inconsistent Dataset×Method×Metric Combinations",
-        booktabs = TRUE) %>%
-    kable_styling(latex_options = c("hold_position"),
-                  font_size = 8)
+        caption = "Top 10 Most Inconsistent Dataset×Method×Metric Combinations",
+        col.names = c("Data", "Dataset", "Method", "Metric", "N Reps",
+                     "Mean Score", "Min Score", "Max Score", "Range", "SD", "Consistent")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                  font_size = 10) %>%
+    scroll_box(width = "100%", height = "400px")
 } else {
   cat("All combinations are perfectly consistent!")
 }
@@ -638,12 +882,67 @@ if (has_seed_data(metric_data)) {
 
 # Performance vs Quality Trade-offs
 
-TODO: pareto frontier analysis
+## Pareto Frontier Analysis
 
-Analyze the relationship between execution time and clustering quality
-Join method and metric data to analyze trade-offs
+Analyze the relationship between execution time and clustering quality using Pareto frontier analysis.
+A method is on the Pareto frontier if no other method achieves both better quality and faster execution time.
 
-```{r performance_quality, fig.width=12, fig.height=8}
+```{r pareto_functions}
+# Function to create Pareto frontier plot
+create_pareto_plot <- function(data, metric_name) {
+  # Compute aggregated performance for each method on each dataset
+  method_performance <- data %>%
+    filter(metric == metric_name, !is.na(execution_time_seconds), !is.na(score)) %>%
+    group_by(method, dataset_generator, dataset_name) %>%
+    summarize(
+      avg_time = mean(execution_time_seconds, na.rm = TRUE),
+      avg_score = mean(score, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  if (nrow(method_performance) == 0) return(NULL)
+
+  # Compute Pareto frontier
+  pareto_data <- compute_pareto_frontier(method_performance, "avg_time", "avg_score",
+                                        minimize_x = TRUE, maximize_y = TRUE)
+
+  # Create the plot
+  p <- ggplot(pareto_data, aes(x = avg_time, y = avg_score)) +
+    geom_point(aes(color = method, shape = is_pareto, size = is_pareto), alpha = 0.7) +
+    scale_shape_manual(values = c("FALSE" = 16, "TRUE" = 17),
+                      name = "Pareto Optimal",
+                      labels = c("No", "Yes")) +
+    scale_size_manual(values = c("FALSE" = 2, "TRUE" = 3), guide = "none") +
+    scale_x_log10() +
+    labs(
+      title = paste("Pareto Frontier:", metric_name),
+      subtitle = "Triangle points indicate Pareto-optimal methods",
+      x = "Average Execution Time (seconds, log scale)",
+      y = paste("Average", metric_name),
+      color = "Method"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom", legend.box = "horizontal") +
+    guides(color = guide_legend(override.aes = list(size = 3)))
+
+  # Add Pareto frontier line if there are enough points
+  pareto_frontier <- pareto_data %>%
+    filter(is_pareto) %>%
+    arrange(avg_time)
+
+  if (nrow(pareto_frontier) > 1) {
+    p <- p + geom_step(data = pareto_frontier,
+                       aes(x = avg_time, y = avg_score),
+                       color = "red", alpha = 0.6, size = 1,
+                       direction = "vh", inherit.aes = FALSE)
+  }
+
+  return(p)
+}
+```
+
+```{r performance_quality, fig.width=14, fig.height=10}
+# Join method and metric data
 combined_data <- metric_data %>%
   left_join(
     method_data %>% select(source_dir, backend, run_timestamp, dataset_generator,
@@ -652,13 +951,109 @@ combined_data <- metric_data %>%
            "dataset_name", "method", "seed")
   )
 
-# Create scatter plots showing time vs quality trade-offs for different metrics
+# Get the most common metrics for analysis
 common_metrics <- combined_data %>%
   count(metric, sort = TRUE) %>%
   slice_head(n = 4) %>%
   pull(metric)
 
-tradeoff_plots <- list()
+cat("Analyzing Pareto frontiers for metrics:", paste(common_metrics, collapse = ", "), "\n")
+
+# Create Pareto frontier plots
+pareto_plots <- list()
+
+for (metric_name in common_metrics) {
+  plot <- create_pareto_plot(combined_data, metric_name)
+  if (!is.null(plot)) {
+    pareto_plots[[metric_name]] <- plot
+  }
+}
+
+if (length(pareto_plots) > 0) {
+  combined_pareto <- wrap_plots(pareto_plots, ncol = 2)
+  print(combined_pareto)
+}
+```
+
+## Pareto Frontier Summary
+
+```{r pareto_summary}
+# Summarize Pareto-optimal methods across metrics
+pareto_summary_list <- list()
+
+for (metric_name in common_metrics) {
+  method_performance <- combined_data %>%
+    filter(metric == metric_name, !is.na(execution_time_seconds), !is.na(score)) %>%
+    group_by(method, dataset_generator, dataset_name) %>%
+    summarize(
+      avg_time = mean(execution_time_seconds, na.rm = TRUE),
+      avg_score = mean(score, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  if (nrow(method_performance) > 0) {
+    pareto_data <- compute_pareto_frontier(method_performance, "avg_time", "avg_score",
+                                          minimize_x = TRUE, maximize_y = TRUE)
+
+    pareto_methods <- pareto_data %>%
+      filter(is_pareto) %>%
+      group_by(method) %>%
+      summarize(
+        datasets_on_frontier = n(),
+        avg_execution_time = mean(avg_time),
+        avg_quality_score = mean(avg_score),
+        .groups = "drop"
+      ) %>%
+      mutate(metric = metric_name)
+
+    pareto_summary_list[[metric_name]] <- pareto_methods
+  }
+}
+
+if (length(pareto_summary_list) > 0) {
+  pareto_summary_combined <- bind_rows(pareto_summary_list)
+
+  cat("\n=== PARETO-OPTIMAL METHODS SUMMARY ===\n")
+
+  # Overall Pareto performance by method
+  overall_pareto <- pareto_summary_combined %>%
+    group_by(method) %>%
+    summarize(
+      metrics_on_frontier = n(),
+      total_datasets_on_frontier = sum(datasets_on_frontier),
+      avg_execution_time = mean(avg_execution_time),
+      avg_quality_score = mean(avg_quality_score),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(metrics_on_frontier), desc(total_datasets_on_frontier))
+
+  kable(overall_pareto,
+        digits = 3,
+        caption = "Methods Ranked by Pareto Frontier Performance",
+        col.names = c("Method", "Metrics on Frontier", "Total Datasets on Frontier",
+                     "Avg Execution Time (s)", "Avg Quality Score")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"))
+
+  # Detailed breakdown by metric
+  cat("\n=== DETAILED PARETO ANALYSIS BY METRIC ===\n")
+  detailed_pareto <- pareto_summary_combined %>%
+    arrange(metric, desc(datasets_on_frontier))
+
+  kable(detailed_pareto,
+        digits = 3,
+        caption = "Pareto-Optimal Methods by Metric",
+        col.names = c("Method", "Datasets on Frontier", "Avg Execution Time (s)",
+                     "Avg Quality Score", "Metric")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover")) %>%
+    collapse_rows(columns = 5)
+}
+```
+
+## Traditional Performance vs Quality Scatter Plots
+
+```{r traditional_scatter, fig.width=12, fig.height=8}
+# Create traditional scatter plots for comparison
+traditional_plots <- list()
 
 for (metric_name in common_metrics) {
   p <- combined_data %>%
@@ -674,12 +1069,12 @@ for (metric_name in common_metrics) {
     theme_minimal() +
     theme(legend.position = "none")
 
-  tradeoff_plots[[metric_name]] <- p
+  traditional_plots[[metric_name]] <- p
 }
 
-if (length(tradeoff_plots) > 0) {
-  combined_tradeoffs <- wrap_plots(tradeoff_plots, ncol = 2)
-  print(combined_tradeoffs)
+if (length(traditional_plots) > 0) {
+  combined_traditional <- wrap_plots(traditional_plots, ncol = 2)
+  print(combined_traditional)
 }
 ```
 
