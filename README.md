@@ -92,7 +92,7 @@ This method ensures that all dependencies are available to RStudio automatically
 
 ## File Structure
 
-- `00_aggregate_scores.py`: Script for aggregating raw benchmark results
+- `aggregate_scores.py`: Script for aggregating raw benchmark results
 - `01_load_data.R`: Helper functions for loading and processing data
 - `02_aggregation.R`: Helper functions for aggregating by dataset x method x metric
 - `10_analysis.Rmd`: Notebook for benchmark analysis
@@ -117,8 +117,5 @@ To run the unit tests:
 ```bash
 cd clustbench-analysis
 Rscript run_tests.R
+python run_tests.py
 ```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a pull request.

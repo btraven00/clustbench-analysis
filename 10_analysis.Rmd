@@ -1,5 +1,5 @@
 ---
-title: "ClustBench Analysis"
+title: "ClustBench Experiment Analysis"
 author: "omnibenchmark core team"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output:
@@ -139,6 +139,7 @@ kable(metric_summary, digits = 3, caption = "Metric Performance Summary by Backe
 
 ## Backend Comparison - Execution Times
 
+
 ```{r execution_time_comparison, fig.width=10, fig.height=8}
 # Compare execution times between backends
 if (nlevels(method_data$backend) > 1) {
@@ -149,17 +150,19 @@ if (nlevels(method_data$backend) > 1) {
 }
 ```
 
-## Execution Time Distribution
+## Runtime Distribution
+
+comparing method runtimes. runtime comes from denet profiler
 
 ```{r execution_time_distribution, fig.width=10, fig.height=6}
 # Distribution of execution times by backend
-p1 <- ggplot(method_data, aes(x = execution_time_seconds, fill = backend)) +
+p1 <- ggplot(method_data, aes(x = runtime, fill = backend)) +
   geom_histogram(alpha = 0.7, bins = 50) +
   scale_x_log10() +
   facet_wrap(~backend, scales = "free_y") +
   labs(
-    title = "Distribution of Execution Times by Backend",
-    x = "Execution Time (seconds, log scale)",
+    title = "Distribution of Runtimes by Backend",
+    x = "runtime (seconds, log scale)",
     y = "Count"
   ) +
   theme_minimal() +
@@ -177,9 +180,9 @@ p2 <- method_data %>%
   geom_boxplot(alpha = 0.7) +
   scale_y_log10() +
   labs(
-    title = "Execution Time Distribution by Method (Top 10)",
+    title = "Runtime Distribution by Method (Top 10)",
     x = "Method",
-    y = "Execution Time (seconds, log scale)"
+    y = "Runtime (seconds, log scale)"
   ) +
   theme_minimal() +
   theme(
@@ -192,10 +195,12 @@ print(p1 / p2)
 
 ## Runtime Distribution Comparison
 
+runtime comes from denet profiler.
+
 ```{r runtime_distribution, fig.width=12, fig.height=8}
 # Compare runtime distributions between backends
 # Runtime is available in both method_data and metric_data
-# We'll use metric_data since it has more granular runtime information per metric
+# metric_data since it has more granular runtime information per metric
 
 p_runtime_method <- method_data %>%
   filter(!is.na(runtime)) %>%
@@ -265,12 +270,13 @@ kable(metric_runtime_summary, digits = 3, caption = "Metric Runtime Statistics b
   kable_styling(bootstrap_options = c("striped", "hover"))
 ```
 
-## Memory Usage Analysis
+# Memory Usage Analysis
 
-### Peak RSS Distribution
+# Peak RSS Distribution
+
+Analyze peak RSS (Resident Set Size) memory usage. RSS comes from denet profiler.
 
 ```{r peak_rss_analysis, fig.width=14, fig.height=10}
-# Analyze peak RSS (Resident Set Size) memory usage
 # Create a 2D facet grid by dataset and method
 
 # First, let's see what data we have for peak_rss
@@ -361,12 +367,13 @@ p_rss_heatmap <- peak_rss_data %>%
 print(p_rss_heatmap)
 ```
 
-## Clustering Quality Analysis
+# Clustering Metric Score Analysis
 
-### Backend Comparison - Clustering Scores
+## Backend Comparison - Clustering Scores
+
+Compare clustering scores between backends
 
 ```{r score_comparison, fig.width=12, fig.height=10}
-# Compare clustering scores between backends
 if (nlevels(metric_data$backend) > 1) {
   score_comparison <- compare_backend_scores(metric_data)
   print(score_comparison)
@@ -375,10 +382,11 @@ if (nlevels(metric_data$backend) > 1) {
 }
 ```
 
-### Score Distribution by Metric
+## Score Distribution by Metric
+
+Distribution of scores by metric
 
 ```{r score_distribution, fig.width=12, fig.height=8}
-# Distribution of scores by metric
 p_scores <- ggplot(metric_data, aes(x = score, fill = metric)) +
   geom_histogram(alpha = 0.7, bins = 30) +
   facet_wrap(~metric, scales = "free") +
@@ -393,7 +401,7 @@ p_scores <- ggplot(metric_data, aes(x = score, fill = metric)) +
 print(p_scores)
 ```
 
-### Top Performing Methods by Metric
+## Top Performing Methods by Metric
 
 ```{r top_methods, fig.width=12, fig.height=10}
 # Calculate top methods for each metric
@@ -429,19 +437,22 @@ p_top <- ggplot(top_methods_by_metric, aes(x = reorder(method, avg_score), y = a
 print(p_top)
 ```
 
-## Data Quality Assessment
+# Data Quality Assessment
 
-### Score Consistency Analysis
+## Score Consistency Analysis
+
+Check score consistency across repetitions
 
 ```{r score_consistency}
-# Check score consistency across repetitions
 consistency_results <- check_score_consistency(metric_data)
 
 cat("Score Consistency Analysis:\n")
 cat("Total unique combinations:", nrow(consistency_results), "\n")
 cat("Perfectly consistent combinations:", sum(consistency_results$is_consistent), "\n")
 cat("Percentage consistent:", round(100 * mean(consistency_results$is_consistent), 2), "%\n")
+```
 
+```{r inconsistent-table, results='asis', echo=FALSE}
 # Show the most inconsistent combinations
 inconsistent <- consistency_results %>%
   filter(!is_consistent) %>%
@@ -449,16 +460,19 @@ inconsistent <- consistency_results %>%
   slice_head(n = 10)
 
 if (nrow(inconsistent) > 0) {
-  kable(inconsistent,
+  kable(head(inconsistent, 10),
         digits = 4,
-        caption = "Top 10 Most Inconsistent Dataset×Method×Metric Combinations") %>%
-    kable_styling(bootstrap_options = c("striped", "hover"))
+        format = "latex",
+        caption = "Top 10 Inconsistent Dataset×Method×Metric Combinations",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"),
+                  font_size = 8)
 } else {
   cat("All combinations are perfectly consistent!")
 }
 ```
 
-### Backend Consistency Summary
+## Backend Consistency Summary
 
 ```{r backend_consistency}
 # Summarize consistency by backend
@@ -467,14 +481,18 @@ if (nlevels(metric_data$backend) > 1) {
 
   kable(backend_consistency,
         digits = 2,
-        caption = "Score Consistency Summary by Backend") %>%
-    kable_styling(bootstrap_options = c("striped", "hover"))
+        caption = "Score Consistency Summary by Backend",
+        col.names = c("Backend", "Total Combos", "Consistent", "% Consistent",
+                     "Avg Range", "Max Range")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                  font_size = 11) %>%
+    scroll_box(width = "100%")
 } else {
   cat("Only one backend available, skipping backend consistency analysis")
 }
 ```
 
-### Data Quality Flags
+## Data Quality Flags
 
 ```{r data_quality}
 # Analyze data quality flags in metric data
@@ -518,7 +536,7 @@ if (quality_summary$empty_files > 0 || quality_summary$duplicate_k_anomalies > 0
 }
 ```
 
-## Seed Variability Analysis
+# Seed Variability Analysis
 
 ```{r seed_analysis, eval=has_seed_data(metric_data)}
 if (has_seed_data(metric_data)) {
@@ -530,8 +548,11 @@ if (has_seed_data(metric_data)) {
     time_variability <- analyze_execution_time_variability(method_data)
 
     cat("Top 10 most variable dataset×method combinations (execution time):\n")
-    print(kable(head(time_variability, 10), digits = 3) %>%
-            kable_styling(bootstrap_options = c("striped", "hover")))
+    kable(head(time_variability, 10),
+          digits = 3,
+          caption = "Execution Time Variability by Dataset and Method") %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+      scroll_box(width = "100%")
   }
 
   # Analyze seed variability in scores
@@ -539,15 +560,19 @@ if (has_seed_data(metric_data)) {
   score_variability <- analyze_score_variability(metric_data)
 
   cat("Top 10 most variable dataset×method×metric combinations (scores):\n")
-  print(kable(head(score_variability, 10), digits = 4) %>%
-          kable_styling(bootstrap_options = c("striped", "hover")))
+
+  kable(head(score_variability, 10),
+        digits = 4,
+        caption = "Score Variability by Dataset, Method and Metric") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+    scroll_box(width = "100%")
 
 } else {
   cat("No seed data available for variability analysis.")
 }
 ```
 
-### Seed Variability Visualization
+## Seed Variability Visualization
 
 ```{r seed_plots, eval=has_seed_data(metric_data), fig.width=12, fig.height=8}
 if (has_seed_data(metric_data)) {
@@ -583,7 +608,7 @@ if (has_seed_data(metric_data)) {
 }
 ```
 
-### Seed Sensitivity Heatmap
+## Seed Sensitivity Heatmap
 
 ```{r seed_heatmap, eval=has_seed_data(metric_data), fig.width=14, fig.height=10}
 if (has_seed_data(metric_data)) {
@@ -611,11 +636,14 @@ if (has_seed_data(metric_data)) {
 }
 ```
 
-## Performance vs Quality Trade-offs
+# Performance vs Quality Trade-offs
+
+TODO: pareto frontier analysis
+
+Analyze the relationship between execution time and clustering quality
+Join method and metric data to analyze trade-offs
 
 ```{r performance_quality, fig.width=12, fig.height=8}
-# Analyze the relationship between execution time and clustering quality
-# Join method and metric data to analyze trade-offs
 combined_data <- metric_data %>%
   left_join(
     method_data %>% select(source_dir, backend, run_timestamp, dataset_generator,
@@ -655,7 +683,7 @@ if (length(tradeoff_plots) > 0) {
 }
 ```
 
-## Summary 
+# Summary
 
 ```{r summary}
 cat("=== CLUSTERING BENCHMARK ANALYSIS SUMMARY ===\n")
@@ -709,7 +737,7 @@ if (has_seed_data(metric_data)) {
 }
 ```
 
-## Appendix: Exploring Metric Variability
+# Appendix: Factors for Metric Variability
 
 ```{r glm_score_analysis, eval=has_seed_data(metric_data)}
 if (has_seed_data(metric_data)) {
@@ -883,7 +911,7 @@ if (has_seed_data(metric_data)) {
 }
 ```
 
-### Variance Explained by Each Factor
+## Variance Explained by Each Factor
 
 ```{r variance_explained_table, eval=exists("glm_factor_variance")}
 if (exists("glm_factor_variance")) {
@@ -895,7 +923,7 @@ if (exists("glm_factor_variance")) {
 }
 ```
 
-### Coefficient Analysis Tables
+## Coefficient Analysis Tables
 
 ```{r coefficient_tables, eval=exists("glm_best_model")}
 if (exists("glm_best_model")) {
